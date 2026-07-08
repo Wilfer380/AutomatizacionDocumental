@@ -5,9 +5,9 @@ from datetime import datetime
 from pathlib import Path
 
 from ..config import OUTPUT_PDF_DIR, OUTPUT_REPORT_DIR, OUTPUT_WORD_DIR, PLACEHOLDER
-from ..models import BatchOptions, BatchSummary, GenerationResult, SeriesRow
+from ..models import BatchOptions, BatchSummary, ConflictStrategy, GenerationResult, SeriesRow
 from ..utils.files import ensure_directory
-from ..utils.text import sanitize_filename
+from ..utils.text import build_output_stem
 
 
 logger = logging.getLogger(__name__)
@@ -42,9 +42,29 @@ class BatchService:
                 progress_callback(index - 1, total, f"Procesando fila {row.row_number}")
 
             timestamp = datetime.now().isoformat(timespec="seconds")
-            base_name = f"{index:04d}_{row.row_number:04d}_{sanitize_filename(row.series)}"
-            docx_path = word_dir / f"{base_name}.docx"
-            pdf_path = pdf_dir / f"{base_name}.pdf"
+            base_stem = build_output_stem(options.template_path, row.series)
+            resolved_stem = self._resolve_output_stem(base_stem, word_dir, pdf_dir, options.conflict_strategy)
+            docx_path = word_dir / f"{(resolved_stem or base_stem)}.docx"
+            pdf_path = pdf_dir / f"{(resolved_stem or base_stem)}.pdf"
+
+            if resolved_stem is None:
+                results.append(
+                    GenerationResult(
+                        row_number=row.row_number,
+                        series=row.series,
+                        docx_filename=docx_path.name,
+                        pdf_filename=pdf_path.name,
+                        docx_path=str(docx_path),
+                        pdf_path=str(pdf_path),
+                        status="skipped",
+                        observation="Omitido por conflicto de nombre existente.",
+                        timestamp=timestamp,
+                    )
+                )
+                if progress_callback:
+                    progress_callback(index, total, f"Fila {row.row_number} omitida por conflicto")
+                continue
+
             try:
                 filled = self.template_service.create_filled_copy(
                     template_path=options.template_path,
@@ -59,6 +79,8 @@ class BatchService:
                 result = GenerationResult(
                     row_number=row.row_number,
                     series=row.series,
+                    docx_filename=docx_path.name,
+                    pdf_filename=generated_pdf.name,
                     docx_path=str(docx_path),
                     pdf_path=str(generated_pdf),
                     status="generated",
@@ -72,6 +94,8 @@ class BatchService:
                     GenerationResult(
                         row_number=row.row_number,
                         series=row.series,
+                        docx_filename=docx_path.name,
+                        pdf_filename=pdf_path.name,
                         docx_path=str(docx_path) if docx_path.exists() else "",
                         pdf_path=str(pdf_path) if pdf_path.exists() else "",
                         status="failed",
@@ -95,3 +119,30 @@ class BatchService:
             report_path=report_path,
             generated_items=results,
         )
+
+    def _resolve_output_stem(
+        self,
+        base_stem: str,
+        word_dir: Path,
+        pdf_dir: Path,
+        conflict_strategy: ConflictStrategy,
+    ) -> str | None:
+        strategy = ConflictStrategy(conflict_strategy)
+        if strategy == ConflictStrategy.OVERWRITE:
+            return base_stem
+
+        if strategy == ConflictStrategy.SKIP:
+            if self._output_exists(base_stem, word_dir, pdf_dir):
+                return None
+            return base_stem
+
+        counter = 0
+        candidate = base_stem
+        while self._output_exists(candidate, word_dir, pdf_dir):
+            counter += 1
+            candidate = f"{base_stem} ({counter})"
+        return candidate
+
+    @staticmethod
+    def _output_exists(stem: str, word_dir: Path, pdf_dir: Path) -> bool:
+        return (word_dir / f"{stem}.docx").exists() or (pdf_dir / f"{stem}.pdf").exists()

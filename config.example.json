@@ -1,0 +1,59 @@
+{
+  "root_path": "Q:\\GROUPS\\CO_MDE_DISENO_DI\\01_ORDERS\\02_DOCUMENTS_APPROVAL_CERTIFIED",
+  "excel_path": "C:\\Users\\wandica\\Downloads\\Listado equipos SLA COL.xlsx",
+  "dossier_folder_name": "06_DOSSIER",
+  "simulation_only": true,
+  "pdf_sources": [
+    {
+      "document_name": "Descriptivo de pintura",
+      "source_pdf_path": "C:\\Docs\\5.2 Descriptivo de pintura.pdf",
+      "target_folder": "5 Pintura",
+      "final_name_pattern": "5.2 Descriptivo de pintura.pdf",
+      "action_type": "reemplazar",
+      "mandatory": true
+    },
+    {
+      "document_name": "Certificado trazabilidad",
+      "source_pdf_path": "C:\\Docs\\6.1 Certificado de Trazabilidad.pdf",
+      "target_folder": "6 Trazabilidad",
+      "final_name_pattern": "6.1 Certificado de Trazabilidad de Ensayos de Pintura SN.pdf",
+      "action_type": "agregar",
+      "mandatory": true
+    },
+    {
+      "document_name": "Resultados adherencia",
+      "source_pdf_path": "C:\\Docs\\7.1 Comunicado técnico - Resultados.pdf",
+      "target_folder": "7 Ensayos",
+      "final_name_pattern": "7.1 Comunicado técnico - Resultados de adherencia.pdf",
+      "action_type": "agregar",
+      "mandatory": true
+    },
+    {
+      "document_name": "Informe laboratorio",
+      "source_pdf_path": "C:\\Docs\\7.2 Informe de Ensayo Laboratorio.pdf",
+      "target_folder": "7 Ensayos",
+      "final_name_pattern": "7.2 Informe de Ensayo Laboratorio - Prueba adherencia.pdf",
+      "action_type": "agregar",
+      "mandatory": true
+    }
+  ],
+  "cp_synonyms": [
+    "CP",
+    "Centro Proyecto",
+    "Codigo CP"
+  ],
+  "serie_synonyms": [
+    "Serie",
+    "Serial",
+    "Numero de serie"
+  ],
+  "phase1_routing": {
+    "enabled": false,
+    "destination_folder": "6 Trazabilidad",
+    "cross_checks": [
+      "filename",
+      "excel_row",
+      "cp"
+    ]
+  }
+}

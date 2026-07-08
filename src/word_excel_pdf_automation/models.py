@@ -14,6 +14,12 @@ class ValidationStatus(str, Enum):
     INVALID = "Invalid"
 
 
+class ConflictStrategy(str, Enum):
+    OVERWRITE = "overwrite"
+    SKIP = "skip"
+    COUNTER = "counter"
+
+
 @dataclass(slots=True)
 class ColumnInfo:
     index: int
@@ -66,12 +72,15 @@ class BatchOptions:
     process_only_selected: bool = True
     libreoffice_path: str = ""
     placeholder: str = "[Serie]"
+    conflict_strategy: ConflictStrategy = ConflictStrategy.OVERWRITE
 
 
 @dataclass(slots=True)
 class GenerationResult:
     row_number: int
     series: str
+    docx_filename: str = ""
+    pdf_filename: str = ""
     docx_path: str = ""
     pdf_path: str = ""
     status: str = ""

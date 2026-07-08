@@ -16,6 +16,7 @@ PDF_generados/
 Reportes/
 
 .env
+config.json
 
 .DS_Store
 Thumbs.db

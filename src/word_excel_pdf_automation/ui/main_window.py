@@ -8,13 +8,15 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox, ttk
 
-from ..config import APP_NAME, DEFAULT_EXCEL_PATH, DEFAULT_OUTPUT_DIR, DEFAULT_TEMPLATE_PATH, PLACEHOLDER
-from ..models import BatchOptions, SeriesRow, SheetInfo, ValidationStatus, WorkbookInfo
+from .. import __version__
+from ..config import APP_NAME, DEFAULT_CONFLICT_STRATEGY, DEFAULT_EXCEL_PATH, DEFAULT_OUTPUT_DIR, DEFAULT_TEMPLATE_PATH, PLACEHOLDER
+from ..models import BatchOptions, ConflictStrategy, SeriesRow, SheetInfo, ValidationStatus, WorkbookInfo
 from ..services.batch_service import BatchService
 from ..services.excel_service import ExcelService
 from ..services.pdf_converter import PdfConverter
 from ..services.report_service import ReportService
 from ..services.template_service import TemplateService
+from .dossier_panel import DossierPanel
 from ..utils.files import open_folder
 
 
@@ -49,6 +51,7 @@ PALETTE = {
     "danger_accent": "#cf4b5b",
     "info": "#eef4ff",
     "info_accent": "#4b72f0",
+    "green": "#1bb36a",
 }
 
 
@@ -62,6 +65,7 @@ class MainWindow(Tk):
         self.title(APP_NAME)
         self.geometry("1366x768")
         self.minsize(1280, 720)
+        self._active_tab = "phase2"
 
         self.excel_service = ExcelService()
         self.template_service = TemplateService()
@@ -101,6 +105,7 @@ class MainWindow(Tk):
         self.exclude_empty_var = BooleanVar(value=True)
         self.exclude_duplicate_var = BooleanVar(value=True)
         self.process_only_selected_var = BooleanVar(value=True)
+        self.conflict_strategy_var = StringVar(value=DEFAULT_CONFLICT_STRATEGY)
 
         self._configure_style()
         self._build_ui()
@@ -135,6 +140,8 @@ class MainWindow(Tk):
         style.configure("SummaryTitle.TLabel", background=PALETTE["surface"], foreground=PALETTE["muted"], font=("Segoe UI", 9))
         style.configure("SummaryValue.TLabel", background=PALETTE["surface"], foreground=PALETTE["text"], font=("Segoe UI Semibold", 18))
         style.configure("SectionNote.TLabel", background=PALETTE["surface"], foreground=PALETTE["muted"], font=("Segoe UI", 9))
+        style.configure("Footer.TLabel", background=PALETTE["header_dark"], foreground="#d7e5f7", font=("Segoe UI", 9))
+        style.configure("FooterValue.TLabel", background=PALETTE["header_dark"], foreground="white", font=("Segoe UI Semibold", 10))
         style.configure("App.TEntry", padding=7)
         style.configure("App.TCombobox", padding=5)
         style.configure("App.TCheckbutton", background=PALETTE["surface"], foreground=PALETTE["text"], font=("Segoe UI", 10))
@@ -167,10 +174,10 @@ class MainWindow(Tk):
         style.configure("TProgressbar", troughcolor=PALETTE["surface_soft"], background=PALETTE["accent"], bordercolor=PALETTE["line"], lightcolor=PALETTE["accent"], darkcolor=PALETTE["accent"])
 
     def _build_ui(self) -> None:
-        header = tk.Frame(self, bg=PALETTE["header"], highlightthickness=0)
-        header.pack(fill="x")
+        self.header = tk.Frame(self, bg=PALETTE["header"], highlightthickness=0)
+        self.header.pack(fill="x")
 
-        header_inner = tk.Frame(header, bg=PALETTE["header"], padx=22, pady=16)
+        header_inner = tk.Frame(self.header, bg=PALETTE["header"], padx=22, pady=16)
         header_inner.pack(fill="x")
 
         left = tk.Frame(header_inner, bg=PALETTE["header"])
@@ -178,25 +185,73 @@ class MainWindow(Tk):
         tk.Label(left, text="Automatización documental", bg=PALETTE["header"], fg="white", font=("Segoe UI Semibold", 20)).pack(anchor="w")
         tk.Label(
             left,
-            text="Carga una plantilla Word y un Excel para generar DOCX/PDF por serie con una vista previa controlada.",
+            text="Automatiza la distribución de documentos en los dossiers según CP y Serie.",
             bg=PALETTE["header"],
             fg="#d7e5f7",
             font=("Segoe UI", 10),
         ).pack(anchor="w", pady=(4, 0))
 
-        tk.Label(
-            header_inner,
-            text="Fase 1",
-            bg="#214a7b",
-            fg="white",
-            font=("Segoe UI Semibold", 10),
-            padx=12,
-            pady=5,
-        ).pack(side="right", anchor="n", padx=(0, 10))
-        tk.Button(
-            header_inner,
-            text="Ayuda",
-            command=self._show_help,
+        actions = tk.Frame(header_inner, bg=PALETTE["header"])
+        actions.pack(side="right", anchor="n")
+        self._header_button(actions, "Acerca de", self._show_about).pack(side="right", padx=(8, 0))
+        self._header_button(actions, "Ayuda", self._show_help).pack(side="right")
+
+        tab_strip = tk.Frame(self, bg=PALETTE["background"])
+        tab_strip.pack(fill="x")
+        tabs_inner = tk.Frame(tab_strip, bg=PALETTE["background"])
+        tabs_inner.pack(fill="x", padx=22, pady=(10, 0))
+
+        self.tab_shells: dict[str, dict[str, tk.Widget]] = {}
+        self._create_tab(tabs_inner, "phase1", "Fase 1 - Generación Word → PDF")
+        self._create_tab(tabs_inner, "phase2", "Fase 2 - Gestión de Dossier")
+
+        tk.Frame(tab_strip, bg=PALETTE["line"], height=1).pack(fill="x", pady=(8, 0))
+
+        self.content_host = tk.Frame(self, bg=PALETTE["background"])
+        self.content_host.pack(fill="both", expand=True)
+
+        self.phase1_container = ttk.Frame(self.content_host, style="App.TFrame")
+        self.phase2_container = ttk.Frame(self.content_host, style="App.TFrame")
+        for frame in (self.phase1_container, self.phase2_container):
+            frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+        self._build_phase1_content(self.phase1_container)
+        self.dossier_panel = DossierPanel(self.phase2_container)
+        self.dossier_panel.pack(fill="both", expand=True)
+
+        footer = tk.Frame(self, bg=PALETTE["header_dark"], height=44)
+        footer.pack(fill="x", side="bottom")
+        footer_inner = tk.Frame(footer, bg=PALETTE["header_dark"], padx=22, pady=10)
+        footer_inner.pack(fill="both", expand=True)
+        footer_inner.columnconfigure(0, weight=1)
+        footer_inner.columnconfigure(1, weight=1)
+        footer_inner.columnconfigure(2, weight=1)
+
+        self.footer_user_var = StringVar(value="wandica")
+        self.footer_profile_var = StringVar(value="Administrador")
+        self.footer_mode_var = StringVar(value="Simulación")
+        self.footer_version_var = StringVar(value="1.0.0")
+
+        footer_left = tk.Frame(footer_inner, bg=PALETTE["header_dark"])
+        footer_left.grid(row=0, column=0, sticky="w")
+        self._footer_field(footer_left, "Usuario", self.footer_user_var).pack(side="left", padx=(0, 18))
+        self._footer_field(footer_left, "Perfil", self.footer_profile_var).pack(side="left")
+
+        footer_center = tk.Frame(footer_inner, bg=PALETTE["header_dark"])
+        footer_center.grid(row=0, column=1)
+        self._footer_field(footer_center, "Modo", self.footer_mode_var).pack()
+
+        footer_right = tk.Frame(footer_inner, bg=PALETTE["header_dark"])
+        footer_right.grid(row=0, column=2, sticky="e")
+        self._footer_field(footer_right, "Versión", self.footer_version_var).pack(anchor="e")
+
+        self._show_tab("phase2")
+
+    def _header_button(self, parent: tk.Widget, text: str, command) -> tk.Button:
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
             bg="#214a7b",
             fg="white",
             activebackground="#2b5c95",
@@ -205,9 +260,60 @@ class MainWindow(Tk):
             padx=16,
             pady=6,
             cursor="hand2",
-        ).pack(side="right", anchor="n")
+            font=("Segoe UI Semibold", 10),
+        )
 
-        viewport = ttk.Frame(self, style="App.TFrame")
+    def _footer_field(self, parent: tk.Widget, label: str, variable: StringVar) -> tk.Widget:
+        frame = tk.Frame(parent, bg=PALETTE["header_dark"])
+        tk.Label(frame, text=f"{label}: ", bg=PALETTE["header_dark"], fg="#d7e5f7", font=("Segoe UI", 9)).pack(side="left")
+        tk.Label(frame, textvariable=variable, bg=PALETTE["header_dark"], fg="white", font=("Segoe UI Semibold", 10)).pack(side="left")
+        return frame
+
+    def _create_tab(self, parent: tk.Widget, key: str, label: str) -> None:
+        shell = tk.Frame(parent, bg=PALETTE["background"])
+        shell.pack(side="left", padx=(0, 28))
+        button = tk.Button(
+            shell,
+            text=label,
+            command=lambda tab=key: self._show_tab(tab),
+            bg=PALETTE["background"],
+            fg=PALETTE["text"],
+            activebackground=PALETTE["background"],
+            activeforeground=PALETTE["accent"],
+            relief="flat",
+            bd=0,
+            padx=0,
+            pady=0,
+            font=("Segoe UI Semibold", 10),
+            cursor="hand2",
+        )
+        button.pack(anchor="w")
+        underline = tk.Frame(shell, bg=PALETTE["background"], height=3)
+        underline.pack(fill="x", pady=(6, 0))
+        self.tab_shells[key] = {"shell": shell, "button": button, "underline": underline}
+
+    def _show_about(self) -> None:
+        messagebox.showinfo(
+            "Acerca de",
+            f"{APP_NAME}\nVersión {__version__}\n\nFase 1 y Fase 2 comparten una misma base corporativa.",
+        )
+
+    def _show_tab(self, tab: str) -> None:
+        self._active_tab = tab
+        if tab == "phase1":
+            self.phase1_container.lift()
+            self.footer_mode_var.set("Generación")
+        else:
+            self.phase2_container.lift()
+            self.footer_mode_var.set("Simulación")
+
+        for key, widgets in self.tab_shells.items():
+            active = key == tab
+            widgets["button"].configure(fg=PALETTE["accent"] if active else PALETTE["text"])
+            widgets["underline"].configure(bg=PALETTE["green"] if active else PALETTE["background"])
+
+    def _build_phase1_content(self, parent: ttk.Frame) -> None:
+        viewport = ttk.Frame(parent, style="App.TFrame")
         viewport.pack(fill="both", expand=True)
         viewport.columnconfigure(0, weight=1)
         viewport.rowconfigure(0, weight=1)
@@ -321,6 +427,19 @@ class MainWindow(Tk):
         ttk.Checkbutton(body, text="Excluir vacías", variable=self.exclude_empty_var, style="App.TCheckbutton", command=self._refresh_tree).pack(anchor="w")
         ttk.Checkbutton(body, text="Excluir duplicadas", variable=self.exclude_duplicate_var, style="App.TCheckbutton", command=self._refresh_tree).pack(anchor="w", pady=(8, 0))
         ttk.Checkbutton(body, text="Procesar solo seleccionadas", variable=self.process_only_selected_var, style="App.TCheckbutton").pack(anchor="w", pady=(8, 0))
+
+        conflict_row = ttk.Frame(body, style="CardBody.TFrame")
+        conflict_row.pack(fill="x", pady=(10, 0))
+        ttk.Label(conflict_row, text="Conflicto de nombre", style="Body.TLabel").pack(side="left")
+        conflict_combo = ttk.Combobox(
+            conflict_row,
+            textvariable=self.conflict_strategy_var,
+            values=[strategy.value for strategy in ConflictStrategy],
+            state="readonly",
+            width=18,
+            style="App.TCombobox",
+        )
+        conflict_combo.pack(side="right")
 
         ttk.Label(body, text="Solo se ejecuta la fase 1: plantillas, Excel, vista previa y generación.", style="SectionNote.TLabel", wraplength=330).pack(anchor="w", pady=(12, 0))
 
@@ -665,6 +784,7 @@ class MainWindow(Tk):
             process_only_selected=self.process_only_selected_var.get(),
             libreoffice_path="",
             placeholder=PLACEHOLDER,
+            conflict_strategy=ConflictStrategy(self.conflict_strategy_var.get()),
         )
 
     def start_generation(self) -> None:

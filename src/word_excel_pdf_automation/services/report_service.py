@@ -17,6 +17,8 @@ class ReportService:
                 fieldnames=[
                     "row_number",
                     "series",
+                    "docx_filename",
+                    "pdf_filename",
                     "docx_output",
                     "pdf_output",
                     "status",
@@ -30,6 +32,8 @@ class ReportService:
                     {
                         "row_number": item.row_number,
                         "series": item.series,
+                        "docx_filename": item.docx_filename,
+                        "pdf_filename": item.pdf_filename,
                         "docx_output": item.docx_path,
                         "pdf_output": item.pdf_path,
                         "status": item.status,
