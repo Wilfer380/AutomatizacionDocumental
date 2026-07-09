@@ -1,6 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 import re
 from pathlib import Path
@@ -32,6 +32,9 @@ class DossierValidationCandidate:
     selected: bool = False
     valid_for_distribution: bool = False
     reason: str = ""
+    folder_5: str = ""
+    folder_6: str = ""
+    folder_7: str = ""
 
 
 @dataclass(slots=True)
@@ -46,21 +49,31 @@ class DossierValidationTreeRow:
     candidates: list[DossierValidationCandidate] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class DossierIndexedCandidate:
+    cp_folder: Path
+    cp_name_key: str
+    cp_code: str
+    dossier_folder: Path | None
+    planos_folder: Path | None
+    folder_5: Path | None
+    folder_6: Path | None
+    folder_7: Path | None
+    series_keys: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class DossierRuntimeIndex:
+    candidates: tuple[DossierIndexedCandidate, ...]
+    cp_code_lookup: dict[str, tuple[DossierIndexedCandidate, ...]]
+
+
 class DossierValidatorService:
     def find_cp_folders(self, root_path: Path, cp: str) -> list[Path]:
         if not root_path.exists():
             return []
-        target_cp_code = self._extract_cp_code(cp)
-        target_key = normalize_for_match(cp)
-        matches: list[Path] = []
-        for candidate in self._iter_directory_candidates(root_path, max_depth=2):
-            candidate_key = normalize_for_match(candidate.name)
-            candidate_cp_code = self._extract_cp_code(candidate.name)
-            if target_cp_code and candidate_cp_code == target_cp_code:
-                matches.append(candidate)
-            elif not target_cp_code and (candidate_key == target_key or target_key in candidate_key or similarity(candidate.name, target_key) >= 0.55):
-                matches.append(candidate)
-        return sorted({path for path in matches}, key=lambda item: len(str(item)))
+        runtime_index = self._build_runtime_index(root_path)
+        return [candidate.cp_folder for candidate in self._match_cp_candidates(runtime_index, cp)]
 
     def find_dossier_folder(self, cp_folder: Path) -> Path | None:
         return self._find_unique_child_match(cp_folder, "06_DOSSIER")[0]
@@ -84,15 +97,15 @@ class DossierValidatorService:
         return matches
 
     def resolve_correct_cp_folder(self, root_path: Path, cp: str, serie: str) -> Path | None:
-        for cp_folder in self.find_cp_folders(root_path, cp):
-            dossier_folder = self.find_dossier_folder(cp_folder)
-            planos_folder = self.find_planos_folder(dossier_folder) if dossier_folder else None
-            if planos_folder and self.serie_exists_in_planos(planos_folder, serie):
-                return cp_folder
+        runtime_index = self._build_runtime_index(root_path)
+        target_key = self._normalize_series_key(serie)
+        for candidate in self._match_cp_candidates(runtime_index, cp):
+            if self._series_found_in_candidate(candidate, target_key):
+                return candidate.cp_folder
         return None
 
     def find_folder_5(self, dossier_folder: Path) -> Path | None:
-        return self._find_phase2_folder(dossier_folder, ("5 Procedimiento de fabricación", "5 Procedimiento de fabricacion", "Procedimiento de fabricación", "Procedimiento de fabricacion", "5", "05"))
+        return self._find_phase2_folder(dossier_folder, ("5 Procedimiento de fabricaci?n", "5 Procedimiento de fabricacion", "Procedimiento de fabricaci?n", "Procedimiento de fabricacion", "5", "05"))
 
     def find_folder_6(self, dossier_folder: Path) -> Path | None:
         return self._find_phase2_folder(dossier_folder, ("6 Trazabilidad", "Trazabilidad", "6", "06"))
@@ -146,20 +159,28 @@ class DossierValidatorService:
             workbook.close()
 
     def build_validation_tree(self, config: DossierConfig, rows: list[DossierRow]) -> list[DossierValidationTreeRow]:
+        runtime_index = self._build_runtime_index(config.root_path, requested_cps=[row.cp for row in rows])
         tree_rows: list[DossierValidationTreeRow] = []
         for row in rows:
-            selected_cp_folder, match_state, candidates = self._inspect_row_candidates(config, row)
+            selected_cp_folder, match_state, candidates = self._inspect_row_candidates(config, row, runtime_index=runtime_index)
             tree_rows.append(DossierValidationTreeRow(row_number=row.row_number, cp=row.cp, serie=row.serie, selected_cp_folder=str(selected_cp_folder) if selected_cp_folder else "", match_state=match_state, status=row.status, observation=row.observation, candidates=candidates))
         return tree_rows
+
     def validate_paths(self, config: DossierConfig, rows: list[DossierRow], progress_callback=None) -> list[DossierRow]:
         total = len(rows)
+        runtime_index = self._build_runtime_index(config.root_path, requested_cps=[row.cp for row in rows])
+        inspection_cache: dict[tuple[str, str], tuple[Path | None, str, list[DossierValidationCandidate]]] = {}
+
         for index, row in enumerate(rows, start=1):
             if row.status in {DossierStatus.ERROR, DossierStatus.SKIPPED}:
                 if progress_callback:
                     progress_callback(index, total, f"Fila {row.row_number} validada")
                 continue
 
-            cp_folder_match, _cp_match_state, candidate_details = self._inspect_row_candidates(config, row)
+            cache_key = (row.normalized_cp, self._normalize_series_key(row.serie))
+            if cache_key not in inspection_cache:
+                inspection_cache[cache_key] = self._inspect_row_candidates(config, row, runtime_index=runtime_index)
+            cp_folder_match, _cp_match_state, candidate_details = inspection_cache[cache_key]
             valid_candidates = [candidate for candidate in candidate_details if candidate.valid_for_distribution]
 
             if cp_folder_match is None or not valid_candidates:
@@ -183,7 +204,7 @@ class DossierValidatorService:
                     row.observation = "Serie no encontrada en Planos para esta CP"
                 elif any(candidate.dossier_exists for candidate in candidate_details):
                     row.status = DossierStatus.SKIPPED
-                    row.observation = "Existe 06_DOSSIER, pero no se encontró carpeta Planos"
+                    row.observation = "Existe 06_DOSSIER, pero no se encontr? carpeta Planos"
                 else:
                     row.status = DossierStatus.SKIPPED
                     row.observation = "Carpeta CP encontrada, pero no existe 06_DOSSIER"
@@ -192,31 +213,18 @@ class DossierValidatorService:
                 continue
 
             primary_candidate = valid_candidates[0]
-            primary_dossier = Path(primary_candidate.dossier_folder)
-            primary_folder_5 = self.find_folder_5(primary_dossier)
-            primary_folder_6 = self.find_folder_6(primary_dossier)
-            primary_folder_7 = self.find_folder_7(primary_dossier)
-
             row.cp_folder = primary_candidate.cp_folder
             row.dossier_folder = primary_candidate.dossier_folder
             row.planos_folder = primary_candidate.planos_folder
-            row.folder_5 = str(primary_folder_5) if primary_folder_5 else ""
-            row.folder_6 = str(primary_folder_6) if primary_folder_6 else ""
-            row.folder_7 = str(primary_folder_7) if primary_folder_7 else ""
+            row.folder_5 = primary_candidate.folder_5
+            row.folder_6 = primary_candidate.folder_6
+            row.folder_7 = primary_candidate.folder_7
             row.series_in_planos = True
             row.matched_dossier_folders = [candidate.dossier_folder for candidate in valid_candidates if candidate.dossier_folder]
             row.matched_planos_folders = [candidate.planos_folder for candidate in valid_candidates if candidate.planos_folder]
-            row.matched_folder_5 = []
-            row.matched_folder_6 = []
-            row.matched_folder_7 = []
-            for candidate in valid_candidates:
-                dossier_folder = Path(candidate.dossier_folder)
-                folder_5 = self.find_folder_5(dossier_folder)
-                folder_6 = self.find_folder_6(dossier_folder)
-                folder_7 = self.find_folder_7(dossier_folder)
-                row.matched_folder_5.append(str(folder_5) if folder_5 else "")
-                row.matched_folder_6.append(str(folder_6) if folder_6 else "")
-                row.matched_folder_7.append(str(folder_7) if folder_7 else "")
+            row.matched_folder_5 = [candidate.folder_5 for candidate in valid_candidates]
+            row.matched_folder_6 = [candidate.folder_6 for candidate in valid_candidates]
+            row.matched_folder_7 = [candidate.folder_7 for candidate in valid_candidates]
             row.status = DossierStatus.VALID
             row.observation = "Validada" if len(valid_candidates) == 1 else f"Validada en {len(valid_candidates)} carpetas"
             if progress_callback:
@@ -274,7 +282,7 @@ class DossierValidatorService:
                     best_name = candidate
         if best_name and best_score >= 0.45:
             return best_name
-        raise DossierWorkbookHeaderError(f"No se encontró una columna que coincida con: {', '.join(synonyms)}")
+        raise DossierWorkbookHeaderError(f"No se encontr? una columna que coincida con: {', '.join(synonyms)}")
 
     @staticmethod
     def _resolve_column_index(columns: list[DossierColumnInfo], column_name: str) -> int:
@@ -282,40 +290,45 @@ class DossierValidatorService:
         for column in columns:
             if normalize_for_match(column.name) == target:
                 return column.index
-        raise DossierWorkbookHeaderError(f"La columna '{column_name}' no se encontró en el libro.")
-    def _inspect_row_candidates(self, config: DossierConfig, row: DossierRow) -> tuple[Path | None, str, list[DossierValidationCandidate]]:
-        candidate_paths = self.find_cp_folders(config.root_path, row.cp)
+        raise DossierWorkbookHeaderError(f"La columna '{column_name}' no se encontr? en el libro.")
+
+    def _inspect_row_candidates(self, config: DossierConfig, row: DossierRow, runtime_index: DossierRuntimeIndex | None = None) -> tuple[Path | None, str, list[DossierValidationCandidate]]:
+        runtime_index = runtime_index or self._build_runtime_index(config.root_path)
+        candidate_entries = self._match_cp_candidates(runtime_index, row.cp)
         candidates: list[DossierValidationCandidate] = []
         valid_paths: list[Path] = []
-        for candidate in candidate_paths:
-            dossier_folder = self.find_dossier_folder(candidate)
-            planos_folder = self.find_planos_folder(dossier_folder) if dossier_folder else None
-            series_found = bool(planos_folder and self.serie_exists_in_planos(planos_folder, row.serie))
-            folder_5 = self.find_folder_5(dossier_folder) if dossier_folder else None
-            folder_6 = self.find_folder_6(dossier_folder) if dossier_folder else None
-            folder_7 = self.find_folder_7(dossier_folder) if dossier_folder else None
-            valid_for_distribution = bool(dossier_folder and planos_folder and series_found)
+        target_series_key = self._normalize_series_key(row.serie)
+
+        for entry in candidate_entries:
+            series_found = self._series_found_in_candidate(entry, target_series_key)
+            valid_for_distribution = bool(entry.dossier_folder and entry.planos_folder and series_found)
             if valid_for_distribution:
-                valid_paths.append(candidate)
-            candidates.append(DossierValidationCandidate(
-                cp_folder=str(candidate),
-                dossier_folder=str(dossier_folder) if dossier_folder else "",
-                planos_folder=str(planos_folder) if planos_folder else "",
-                dossier_exists=dossier_folder is not None,
-                planos_exists=planos_folder is not None,
-                series_found=series_found,
-                folder_5_exists=folder_5 is not None,
-                folder_6_exists=folder_6 is not None,
-                folder_7_exists=folder_7 is not None,
-                selected=valid_for_distribution,
-                valid_for_distribution=valid_for_distribution,
-                reason=self._candidate_reason(dossier_folder, planos_folder, series_found, valid_for_distribution),
-            ))
+                valid_paths.append(entry.cp_folder)
+            candidates.append(
+                DossierValidationCandidate(
+                    cp_folder=str(entry.cp_folder),
+                    dossier_folder=str(entry.dossier_folder) if entry.dossier_folder else "",
+                    planos_folder=str(entry.planos_folder) if entry.planos_folder else "",
+                    dossier_exists=entry.dossier_folder is not None,
+                    planos_exists=entry.planos_folder is not None,
+                    series_found=series_found,
+                    folder_5_exists=entry.folder_5 is not None,
+                    folder_6_exists=entry.folder_6 is not None,
+                    folder_7_exists=entry.folder_7 is not None,
+                    selected=valid_for_distribution,
+                    valid_for_distribution=valid_for_distribution,
+                    reason=self._candidate_reason(entry.dossier_folder, entry.planos_folder, series_found, valid_for_distribution),
+                    folder_5=str(entry.folder_5) if entry.folder_5 else "",
+                    folder_6=str(entry.folder_6) if entry.folder_6 else "",
+                    folder_7=str(entry.folder_7) if entry.folder_7 else "",
+                )
+            )
+
         if valid_paths:
             return valid_paths[0], "matched", candidates
-        if not candidate_paths:
+        if not candidate_entries:
             return None, "missing", []
-        if len(candidate_paths) > 1:
+        if len(candidate_entries) > 1:
             return None, "ambiguous", candidates
         return None, "missing-series", candidates
 
@@ -324,31 +337,48 @@ class DossierValidatorService:
         if dossier_folder is None:
             return "Carpeta candidata encontrada, pero no existe 06_DOSSIER."
         if planos_folder is None:
-            return "Existe 06_DOSSIER, pero no se encontró carpeta Planos."
+            return "Existe 06_DOSSIER, pero no se encontr? carpeta Planos."
         if not series_found:
-            return "Existe Planos, pero la serie no se encontró en esta candidata."
+            return "Existe Planos, pero la serie no se encontr? en esta candidata."
         if valid_for_distribution:
-            return "Carpeta válida para distribución."
-        return "Candidata no válida para distribución."
+            return "Carpeta v?lida para distribuci?n."
+        return "Candidata no v?lida para distribuci?n."
 
     def _find_phase2_folder(self, dossier_folder: Path, terms: tuple[str, ...]) -> Path | None:
         if not dossier_folder.exists():
             return None
+        numbered_terms = {self._extract_leading_number(term) for term in terms if self._extract_leading_number(term)}
+        candidates = [item for item in dossier_folder.iterdir() if item.is_dir()]
+        if numbered_terms:
+            numbered_candidates = [candidate for candidate in candidates if self._extract_leading_number(candidate.name) in numbered_terms]
+            if numbered_candidates:
+                candidates = numbered_candidates
         best_path: Path | None = None
         best_score = 0.0
-        for candidate in (item for item in dossier_folder.iterdir() if item.is_dir()):
+        for candidate in candidates:
             candidate_key = normalize_for_match(candidate.name)
+            candidate_number = self._extract_leading_number(candidate.name)
             for term in terms:
                 term_key = normalize_for_match(term)
+                term_number = self._extract_leading_number(term)
+                if term_number and candidate_number and term_number != candidate_number:
+                    continue
                 score = similarity(candidate.name, term_key)
                 if candidate_key == term_key:
                     return candidate
                 if term_key in candidate_key:
                     score += 0.35
+                if term_number and candidate_number == term_number:
+                    score += 0.4
                 if score > best_score:
                     best_score = score
                     best_path = candidate
         return best_path if best_score >= 0.45 else None
+
+    @staticmethod
+    def _extract_leading_number(value: str) -> str:
+        match = re.match(r"\s*(\d+)", normalize_series(value))
+        return match.group(1) if match else ""
 
     @staticmethod
     def _extract_cp_code(value: str) -> str:
@@ -420,6 +450,80 @@ class DossierValidatorService:
             for child in children:
                 if child.is_dir() or include_files:
                     stack.append((child, depth + 1))
+
+    def _build_runtime_index(self, root_path: Path, requested_cps: Iterable[str] | None = None) -> DossierRuntimeIndex:
+        candidates: list[DossierIndexedCandidate] = []
+        cp_code_lookup: dict[str, list[DossierIndexedCandidate]] = defaultdict(list)
+
+        requested_codes: set[str] = set()
+        requested_names: list[str] = []
+        if requested_cps is not None:
+            for cp in requested_cps:
+                cp_code = self._extract_cp_code(cp)
+                if cp_code:
+                    requested_codes.add(cp_code)
+                else:
+                    requested_names.append(normalize_for_match(cp))
+
+        for cp_folder in sorted(self._iter_directory_candidates(root_path, max_depth=1), key=lambda item: len(str(item))):
+            cp_name_key = normalize_for_match(cp_folder.name)
+            cp_code = self._extract_cp_code(cp_folder.name)
+
+            if requested_cps is not None:
+                matches_requested = False
+                if cp_code and cp_code in requested_codes:
+                    matches_requested = True
+                elif any(name_key == cp_name_key or name_key in cp_name_key or cp_name_key in name_key for name_key in requested_names):
+                    matches_requested = True
+                if not matches_requested:
+                    continue
+
+            dossier_folder = self.find_dossier_folder(cp_folder)
+            planos_folder = self.find_planos_folder(dossier_folder) if dossier_folder else None
+            folder_5 = self.find_folder_5(dossier_folder) if dossier_folder else None
+            folder_6 = self.find_folder_6(dossier_folder) if dossier_folder else None
+            folder_7 = self.find_folder_7(dossier_folder) if dossier_folder else None
+            series_keys: list[str] = []
+            if planos_folder:
+                seen_series: set[str] = set()
+                for candidate in self._iter_path_candidates(planos_folder, max_depth=5, include_files=True):
+                    series_key = self._normalize_series_key(candidate.name)
+                    if series_key and series_key not in seen_series:
+                        seen_series.add(series_key)
+                        series_keys.append(series_key)
+            indexed = DossierIndexedCandidate(
+                cp_folder=cp_folder,
+                cp_name_key=cp_name_key,
+                cp_code=cp_code,
+                dossier_folder=dossier_folder,
+                planos_folder=planos_folder,
+                folder_5=folder_5,
+                folder_6=folder_6,
+                folder_7=folder_7,
+                series_keys=tuple(series_keys),
+            )
+            candidates.append(indexed)
+            if indexed.cp_code:
+                cp_code_lookup[indexed.cp_code].append(indexed)
+
+        return DossierRuntimeIndex(candidates=tuple(candidates), cp_code_lookup={key: tuple(value) for key, value in cp_code_lookup.items()})
+
+    def _match_cp_candidates(self, runtime_index: DossierRuntimeIndex, cp: str) -> list[DossierIndexedCandidate]:
+        target_cp_code = self._extract_cp_code(cp)
+        target_key = normalize_for_match(cp)
+        if target_cp_code:
+            return list(runtime_index.cp_code_lookup.get(target_cp_code, ()))
+
+        matches: list[DossierIndexedCandidate] = []
+        for candidate in runtime_index.candidates:
+            if candidate.cp_name_key == target_key or target_key in candidate.cp_name_key or similarity(candidate.cp_folder.name, target_key) >= 0.55:
+                matches.append(candidate)
+        return sorted(matches, key=lambda item: len(str(item.cp_folder)))
+
+    def _series_found_in_candidate(self, candidate: DossierIndexedCandidate, target_series_key: str) -> bool:
+        if not target_series_key:
+            return False
+        return any(target_series_key in series_key for series_key in candidate.series_keys)
 
     @staticmethod
     def _normalize_series_key(value: str) -> str:

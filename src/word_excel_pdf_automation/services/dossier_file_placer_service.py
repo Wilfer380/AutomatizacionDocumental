@@ -46,7 +46,7 @@ class DossierFilePlacerService:
                         items.append(DossierActionResult(row_number=row.row_number, cp=row.cp, serie=row.serie, rule_name=rule.name, target_folder="", planned_path="", action_type=DossierActionType.SKIPPED, status=DossierStatus.SKIPPED, skipped_reason="No se encontró la carpeta destino dentro del dossier.", observation="Falta la carpeta destino durante la planificación."))
                         self._notify(progress_callback, len(items), total_actions, row)
                         continue
-                    source_pdf = source_lookup.get(normalize_for_match(rule.target_folder)) or source_lookup.get(normalize_for_match(rule.name))
+                    source_pdf = source_lookup.get(normalize_for_match(rule.name)) or source_lookup.get(normalize_for_match(rule.target_folder))
                     source_path = Path(source_pdf.source_pdf_path) if source_pdf else Path()
                     if not source_pdf or not source_path.exists():
                         missing_status = DossierStatus.ERROR if (source_pdf is None or source_pdf.mandatory) else DossierStatus.SKIPPED

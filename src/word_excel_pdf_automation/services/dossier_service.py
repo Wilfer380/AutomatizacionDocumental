@@ -8,16 +8,18 @@ from .dossier_backup_service import DossierBackupService
 from .dossier_distribution_service import DossierDistributionService, RealModeConfirmationRequiredError
 from .dossier_file_placer_service import DossierFilePlacerService
 from .dossier_report_service import DossierReportService
+from .dossier_simulation_workspace_service import DossierSimulationWorkspaceService
 from .dossier_validator_service import DossierValidatorService, DossierWorkbookHeaderError
 
 
 class DossierService:
-    def __init__(self, validator: DossierValidatorService | None = None, placer: DossierFilePlacerService | None = None, report_service: DossierReportService | None = None, backup_service: DossierBackupService | None = None, distribution_service: DossierDistributionService | None = None) -> None:
+    def __init__(self, validator: DossierValidatorService | None = None, placer: DossierFilePlacerService | None = None, report_service: DossierReportService | None = None, backup_service: DossierBackupService | None = None, distribution_service: DossierDistributionService | None = None, simulation_workspace_service: DossierSimulationWorkspaceService | None = None) -> None:
         self.validator = validator or DossierValidatorService()
         self.placer = placer or DossierFilePlacerService()
         self.report_service = report_service or DossierReportService()
         self.backup_service = backup_service or DossierBackupService()
         self.distribution_service = distribution_service or DossierDistributionService(self.backup_service)
+        self.simulation_workspace_service = simulation_workspace_service or DossierSimulationWorkspaceService()
 
     def load_config(self, config_path: Path | None = None) -> DossierConfig:
         resolved_path = config_path or DEFAULT_DOSSIER_CONFIG_PATH
@@ -30,6 +32,7 @@ class DossierService:
         if not summary.blocked:
             backup = self.backup_service.plan_backup(config.config_path, DEFAULT_OUTPUT_DIR / 'Backups', simulated=True)
             summary.backup_path = str(backup.destination_path)
+            summary = self.simulation_workspace_service.materialize(config.root_path, summary, DEFAULT_OUTPUT_DIR / 'DossierSimulation')
         report_root = report_dir or DEFAULT_OUTPUT_DIR / 'DossierReports'
         self.report_service.write_json_report(report_root, summary)
         return summary
@@ -53,6 +56,8 @@ class DossierService:
             summary.errors = sum(1 for item in summary.items if item.status == DossierStatus.ERROR)
             summary.warnings = sum(1 for item in summary.items if item.status == DossierStatus.SKIPPED)
             summary.planned_actions = len(summary.items)
+        if summary.execution_mode == DossierExecutionMode.SIMULATION:
+            summary = self.simulation_workspace_service.materialize(config.root_path, summary, DEFAULT_OUTPUT_DIR / 'DossierSimulation')
         backup = self.backup_service.plan_backup(config.config_path, DEFAULT_OUTPUT_DIR / 'Backups', simulated=config.simulation_only)
         summary.backup_path = str(backup.destination_path)
         report_root = report_dir or DEFAULT_OUTPUT_DIR / 'DossierReports'

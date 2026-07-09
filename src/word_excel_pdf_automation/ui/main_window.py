@@ -107,14 +107,33 @@ class MainWindow(Tk):
         self.process_only_selected_var = BooleanVar(value=True)
         self.conflict_strategy_var = StringVar(value=DEFAULT_CONFLICT_STRATEGY)
 
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         self._configure_style()
         self._build_ui()
         self.after(0, self._maximize_to_screen)
+        self.after(80, self._bring_to_front)
         self.after(120, self._poll_queue)
 
     def _maximize_to_screen(self) -> None:
         try:
             self.state("zoomed")
+        except Exception:
+            pass
+
+    def _bring_to_front(self) -> None:
+        try:
+            self.deiconify()
+            self.lift()
+            self.attributes("-topmost", True)
+            self.after(250, lambda: self.attributes("-topmost", False))
+            self.focus_force()
+        except Exception:
+            pass
+
+    def _on_close(self) -> None:
+        try:
+            self.destroy()
         except Exception:
             pass
 

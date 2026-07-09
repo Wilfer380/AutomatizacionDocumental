@@ -167,3 +167,54 @@ def test_distribution_plans_multiple_targets_for_same_cp(tmp_path: Path) -> None
     summary = DossierService().run_simulation(_build_config(root_path=root_path, excel_path=workbook_path), report_dir=tmp_path / "reports-multi")
     descriptivos = [item for item in summary.items if item.rule_name == "Descriptivo de pintura"]
     assert len(descriptivos) == 2
+
+
+def test_simulation_creates_real_preview_workspace(tmp_path: Path) -> None:
+    workbook_path = _write_workbook(tmp_path / "simulation-workspace.xlsx", ["Centro Proyecto", "N?mero de serie"], [["CP-01", "S-001"]])
+    root_path = tmp_path / "root"
+    _build_cp_tree(root_path, "CP-01", "S-001")
+    _create_all_sources(tmp_path)
+    summary = DossierService().run_simulation(_build_config(root_path=root_path, excel_path=workbook_path), report_dir=tmp_path / "reports-sim-workspace")
+    descriptivo = next(item for item in summary.items if item.rule_name == "Descriptivo de pintura")
+    assert summary.simulation_root
+    assert Path(summary.simulation_root).exists()
+    assert descriptivo.simulation_path
+    assert Path(descriptivo.simulation_path).exists()
+    assert Path(descriptivo.planned_path).exists() is False
+
+
+
+def test_simulation_creates_root_even_when_no_files_can_be_copied(tmp_path: Path) -> None:
+    workbook_path = _write_workbook(tmp_path / "simulation-empty-root.xlsx", ["Centro Proyecto", "Número de serie"], [["CP-01", "S-001"]])
+    root_path = tmp_path / "root"
+    _build_cp_tree(root_path, "CP-01", "S-001")
+    config = _build_config(root_path=root_path, excel_path=workbook_path)
+    summary = DossierService().run_simulation(config, report_dir=tmp_path / "reports-empty-root")
+    assert summary.simulation_root
+    assert Path(summary.simulation_root).exists()
+    assert all(not item.simulation_path for item in summary.items)
+
+def test_folder_7_documents_are_routed_to_ensayos_not_planos(tmp_path: Path) -> None:
+    workbook_path = _write_workbook(tmp_path / "folder7-target.xlsx", ["Centro Proyecto", "N?mero de serie"], [["CP-01", "S-001"]])
+    root_path = tmp_path / "root"
+    _build_cp_tree(root_path, "CP-01", "S-001")
+    _create_all_sources(tmp_path)
+    summary = DossierService().run_simulation(_build_config(root_path=root_path, excel_path=workbook_path), report_dir=tmp_path / "reports-folder7-target")
+    folder7_items = [item for item in summary.items if item.rule_name in {"Resultados adherencia", "Informe laboratorio"}]
+    assert folder7_items
+    assert all("7 Ensayos" in item.target_folder for item in folder7_items)
+    assert all("2 Planos" not in item.target_folder for item in folder7_items)
+
+
+def test_distribution_uses_distinct_sources_for_folder_7_rules(tmp_path: Path) -> None:
+    workbook_path = _write_workbook(tmp_path / "folder7.xlsx", ["Centro Proyecto", "N?mero de serie"], [["CP-01", "S-001"]])
+    root_path = tmp_path / "root"
+    _build_cp_tree(root_path, "CP-01", "S-001")
+    _create_all_sources(tmp_path)
+    summary = DossierService().run_simulation(_build_config(root_path=root_path, excel_path=workbook_path), report_dir=tmp_path / "reports-folder7")
+    comunicado = next(item for item in summary.items if item.rule_name.startswith("Resultados"))
+    informe = next(item for item in summary.items if item.rule_name.startswith("Informe"))
+    assert "7.1 Comunicado" in comunicado.source_pdf_path and "Resultados.pdf" in comunicado.source_pdf_path
+    assert "7.2 Informe de Ensayo Laboratorio.pdf" in informe.source_pdf_path
+
+

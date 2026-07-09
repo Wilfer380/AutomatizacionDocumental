@@ -80,8 +80,8 @@ STATUS_PRIORITY = {
     DossierStatus.ERROR: 4,
     DossierStatus.BLOCKED: 4,
     DossierStatus.WARNING: 3,
-    DossierStatus.SKIPPED: 2,
-    DossierStatus.PLANNED: 1,
+    DossierStatus.SKIPPED: 1,
+    DossierStatus.PLANNED: 2,
     DossierStatus.SIMULATED: 1,
     DossierStatus.VALID: 0,
     DossierStatus.COPIED: 0,
@@ -878,7 +878,10 @@ class DossierPanel(ttk.Frame):
                     self._set_operation_progress(final_total, final_total, "Simulación completada" if payload.execution_mode == DossierExecutionMode.SIMULATION else "Ejecución real completada")
                     self._show_distribution_dialog(payload)
                     if self.open_report_var.get():
-                        self.after(200, self.open_report)
+                        if getattr(payload, 'simulation_root', '') and payload.execution_mode == DossierExecutionMode.SIMULATION:
+                            self.after(200, lambda: self._open_path(getattr(payload, 'simulation_root', ''), "Simulaci?n"))
+                        else:
+                            self.after(200, self.open_report)
                 elif kind == "error":
                     self._operation_running = False
                     self._set_running_state(False)
@@ -891,7 +894,8 @@ class DossierPanel(ttk.Frame):
 
     def _apply_summary(self, summary) -> None:
         self._last_summary = summary
-        self.report_path_var.set(str(summary.report_path) if summary.report_path else self.report_path_var.get())
+        visible_result_path = str(getattr(summary, 'simulation_root', '') or (summary.report_path if summary.report_path else self.report_path_var.get()))
+        self.report_path_var.set(visible_result_path)
         self.last_update_var.set(datetime.now().strftime("%d/%m/%Y %H:%M:%S"))
         self._write_log(summary)
 
@@ -953,6 +957,9 @@ class DossierPanel(ttk.Frame):
     def _show_validation_dialog(self, tree_rows: list[DossierValidationTreeRow]) -> None:
         nodes = self._build_validation_tree_nodes(tree_rows)
         summary_rows = self.preview_records or [self._validation_row_to_record(row) for row in self._validation_rows_cache]
+        owner = self.winfo_toplevel()
+        if hasattr(owner, '_bring_to_front'):
+            owner._bring_to_front()
         DossierResultDialog(
             self.winfo_toplevel(),
             title="Resultado de validación CP y Series",
@@ -1348,13 +1355,14 @@ class DossierResultDialog(tk.Toplevel):
         summary_title: str = "Resumen",
     ) -> None:
         super().__init__(parent)
+        self.withdraw()
         self.title(title)
         self.configure(bg=PALETTE["background"])
         self.geometry("1280x780")
         self.minsize(1120, 680)
         self.transient(parent.winfo_toplevel())
-        self.grab_set()
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.protocol("WM_DELETE_WINDOW", self._close_dialog)
+        self.bind("<Escape>", lambda _event: self._close_dialog())
 
         container = ttk.Frame(self, style="App.TFrame", padding=16)
         container.pack(fill="both", expand=True)
@@ -1460,6 +1468,12 @@ class DossierResultDialog(tk.Toplevel):
         else:
             tk.Label(summary_frame, text="No hay resumen para mostrar.", bg=PALETTE["surface"], fg=PALETTE["muted"], font=("Segoe UI", 9)).grid(row=1, column=0, sticky="w")
 
+        actions = ttk.Frame(container, style="CardBody.TFrame")
+        actions.grid(row=4, column=0, sticky="e", pady=(12, 0))
+        ttk.Button(actions, text="Cerrar", style="Ghost.TButton", command=self._close_dialog).pack(side="right")
+
+        self.after(0, self._show_centered)
+
     def _insert_nodes(self, parent_id: str, nodes: list[dict[str, object]]) -> None:
         for node in nodes:
             status = self._status_tag(node.get("status"))
@@ -1503,3 +1517,44 @@ class DossierResultDialog(tk.Toplevel):
             "error": "Error",
             "skipped": "Omitido",
         }.get(str(status), str(status))
+
+    def _show_centered(self) -> None:
+        self.update_idletasks()
+        parent = self.master.winfo_toplevel() if self.master is not None else None
+        width = max(self.winfo_width(), 1120)
+        height = max(self.winfo_height(), 680)
+
+        if parent is not None and parent.winfo_exists():
+            try:
+                parent.update_idletasks()
+                base_x = parent.winfo_rootx()
+                base_y = parent.winfo_rooty()
+                base_width = max(parent.winfo_width(), width)
+                base_height = max(parent.winfo_height(), height)
+                x = max(base_x + (base_width - width) // 2, 0)
+                y = max(base_y + (base_height - height) // 2, 0)
+            except Exception:
+                x = max((self.winfo_screenwidth() - width) // 2, 0)
+                y = max((self.winfo_screenheight() - height) // 2, 0)
+        else:
+            x = max((self.winfo_screenwidth() - width) // 2, 0)
+            y = max((self.winfo_screenheight() - height) // 2, 0)
+
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.deiconify()
+        self.lift()
+        try:
+            self.attributes("-topmost", True)
+            self.after(250, lambda: self.attributes("-topmost", False))
+        except Exception:
+            pass
+        try:
+            self.focus_force()
+        except Exception:
+            pass
+
+    def _close_dialog(self) -> None:
+        try:
+            self.destroy()
+        except Exception:
+            pass

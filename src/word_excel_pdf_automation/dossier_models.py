@@ -219,6 +219,7 @@ class DossierActionResult:
     action_type: DossierActionType = DossierActionType.PLANNED
     execution_mode: DossierExecutionMode = DossierExecutionMode.SIMULATION
     backup_path: str = ""
+    simulation_path: str = ""
     written_path: str = ""
     skipped_reason: str = ""
     status: DossierStatus = DossierStatus.PLANNED
@@ -237,6 +238,7 @@ class DossierActionResult:
             "action_type": self.action_type.value,
             "execution_mode": self.execution_mode.value,
             "backup_path": self.backup_path,
+            "simulation_path": self.simulation_path,
             "written_path": self.written_path,
             "skipped_reason": self.skipped_reason,
             "status": self.status.value,
@@ -257,6 +259,7 @@ class DossierRunSummary:
     report_path: Path | None = None
     items: list[DossierActionResult] = field(default_factory=list)
     backup_path: str = ""
+    simulation_root: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -269,5 +272,6 @@ class DossierRunSummary:
             "execution_mode": self.execution_mode.value,
             "report_path": str(self.report_path) if self.report_path else "",
             "backup_path": self.backup_path,
+            "simulation_root": self.simulation_root,
             "items": [item.to_dict() for item in self.items],
         }
