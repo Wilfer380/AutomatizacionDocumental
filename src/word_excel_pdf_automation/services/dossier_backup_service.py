@@ -21,7 +21,7 @@ class DossierBackupService:
         destination_path = backup_root / f"config_backup_{timestamp}.json"
         if source_path is None:
             return BackupPlan(source_path=Path(), destination_path=destination_path, simulated=simulated, status="skipped", observation="No se proporcionó un archivo de configuración.")
-        if not source_path.exists():
+        if not source_path.is_file():
             return BackupPlan(source_path=source_path, destination_path=destination_path, simulated=simulated, status="missing", observation="El archivo de configuración de origen no existe.")
         if simulated:
             return BackupPlan(source_path=source_path, destination_path=destination_path, simulated=True, status="planned", observation="Solo simulación; no se copió ningún archivo.")
@@ -37,7 +37,7 @@ class DossierBackupService:
             return BackupPlan(source_path=Path(), destination_path=destination_path, simulated=simulated, status="skipped", observation="No se proporcionó un archivo de destino.")
 
         backup_path = backup_root / f"destination_backup_{destination_path.stem}_{timestamp}{destination_path.suffix}"
-        if not destination_path.exists():
+        if not destination_path.is_file():
             return BackupPlan(source_path=destination_path, destination_path=backup_path, simulated=simulated, status="missing", observation="El archivo de destino no existe.")
         if simulated:
             return BackupPlan(source_path=destination_path, destination_path=backup_path, simulated=True, status="planned", observation="Solo simulación; el respaldo del destino no se copió.")

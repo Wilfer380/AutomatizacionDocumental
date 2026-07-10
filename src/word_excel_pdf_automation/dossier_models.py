@@ -95,6 +95,9 @@ class DossierConfig:
     sheet_name: str = ""
     dossier_folder_name: str = "06_DOSSIER"
     simulation_only: bool = True
+    replace_existing: bool = True
+    cp_filter: str = ""
+    serie_filter: str = ""
     cp_synonyms: tuple[str, ...] = DOSSIER_CP_SYNONYMS
     serie_synonyms: tuple[str, ...] = DOSSIER_SERIE_SYNONYMS
     pdf_sources: list[DossierPdfSource] = field(default_factory=list)
@@ -146,6 +149,9 @@ class DossierConfig:
             sheet_name=str(data.get("sheet_name", "")).strip(),
             dossier_folder_name=str(data.get("dossier_folder_name", "06_DOSSIER")).strip() or "06_DOSSIER",
             simulation_only=bool(data.get("simulation_only", True)),
+            replace_existing=bool(data.get("replace_existing", True)),
+            cp_filter=str(data.get("cp_filter", "")).strip(),
+            serie_filter=str(data.get("serie_filter", "")).strip(),
             cp_synonyms=tuple(str(item).strip() for item in data.get("cp_synonyms", DOSSIER_CP_SYNONYMS) if str(item).strip()),
             serie_synonyms=tuple(str(item).strip() for item in data.get("serie_synonyms", DOSSIER_SERIE_SYNONYMS) if str(item).strip()),
             pdf_sources=pdf_sources,
@@ -160,6 +166,9 @@ class DossierConfig:
             "sheet_name": self.sheet_name,
             "dossier_folder_name": self.dossier_folder_name,
             "simulation_only": self.simulation_only,
+            "replace_existing": self.replace_existing,
+            "cp_filter": self.cp_filter,
+            "serie_filter": self.serie_filter,
             "cp_synonyms": list(self.cp_synonyms),
             "serie_synonyms": list(self.serie_synonyms),
             "pdf_sources": [source.to_dict() for source in self.pdf_sources],

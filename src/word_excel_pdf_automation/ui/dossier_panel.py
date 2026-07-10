@@ -24,6 +24,7 @@ from ..utils.text import normalize_for_match
 logger = logging.getLogger(__name__)
 
 PROGRESS_ANIMATION_MS = 10
+QUEUE_POLL_MS = 50
 
 
 PALETTE = {
@@ -58,8 +59,8 @@ STATUS_LABELS = {
     DossierStatus.SKIPPED: "Omitido",
     DossierStatus.PLANNED: "Simulado",
     DossierStatus.SIMULATED: "Simulado",
-    DossierStatus.COPIED: "Correcto",
-    DossierStatus.REPLACED: "Correcto",
+    DossierStatus.COPIED: "Agregado",
+    DossierStatus.REPLACED: "Reemplazado",
 }
 
 
@@ -69,23 +70,23 @@ STATUS_TAGS = {
     DossierStatus.ERROR: "error",
     DossierStatus.BLOCKED: "error",
     DossierStatus.SKIPPED: "skipped",
-    DossierStatus.PLANNED: "skipped",
-    DossierStatus.SIMULATED: "skipped",
+    DossierStatus.PLANNED: "correct",
+    DossierStatus.SIMULATED: "correct",
     DossierStatus.COPIED: "correct",
     DossierStatus.REPLACED: "correct",
 }
 
 
 STATUS_PRIORITY = {
-    DossierStatus.ERROR: 4,
-    DossierStatus.BLOCKED: 4,
-    DossierStatus.WARNING: 3,
-    DossierStatus.SKIPPED: 1,
-    DossierStatus.PLANNED: 2,
-    DossierStatus.SIMULATED: 1,
-    DossierStatus.VALID: 0,
-    DossierStatus.COPIED: 0,
-    DossierStatus.REPLACED: 0,
+    DossierStatus.ERROR: 6,
+    DossierStatus.BLOCKED: 6,
+    DossierStatus.WARNING: 5,
+    DossierStatus.COPIED: 4,
+    DossierStatus.REPLACED: 4,
+    DossierStatus.PLANNED: 3,
+    DossierStatus.SIMULATED: 3,
+    DossierStatus.VALID: 3,
+    DossierStatus.SKIPPED: 2,
 }
 
 
@@ -96,6 +97,10 @@ class DocumentField:
     target_folder: str
     final_name: str
     replacement_note: str
+
+
+class OperationCancelledError(RuntimeError):
+    pass
 
 
 class DossierPanel(ttk.Frame):
@@ -124,6 +129,8 @@ class DossierPanel(ttk.Frame):
         self.replace_var = BooleanVar(value=True)
         self.continue_var = BooleanVar(value=True)
         self.open_report_var = BooleanVar(value=True)
+        self.execution_cp_filter_var = StringVar(value="Todas")
+        self.execution_serie_filter_var = StringVar(value="Todas")
 
         self.preview_filter_var = StringVar(value="")
         self.progress_state_var = StringVar(value="Validando serie 12546447010 en Q:\\...\\CP_17655479_B\\06_DOSSIER\\2 Planos...")
@@ -143,7 +150,13 @@ class DossierPanel(ttk.Frame):
         self._operation_running = False
         self._current_operation_label = "simulación"
         self._sheet_values: tuple[str, ...] = ("Hoja1",)
+        self._cancel_requested = threading.Event()
+        self._active_action_button: ttk.Button | None = None
+        self._default_button_labels: dict[ttk.Button, str] = {}
         self._excel_rows_cache = []
+        self._execution_cp_values: tuple[str, ...] = ("Todas",)
+        self._execution_series_values: tuple[str, ...] = ("Todas",)
+        self._execution_series_by_cp: dict[str, tuple[str, ...]] = {}
         self._validation_rows_cache: list[DossierRow] = []
         self._validation_tree_cache: list[DossierValidationTreeRow] = []
         self._last_summary = None
@@ -163,7 +176,7 @@ class DossierPanel(ttk.Frame):
         self._configure_style()
         self._build_ui()
         self._reset_initial_state()
-        self.after(120, self._poll_operation_queue)
+        self.after(QUEUE_POLL_MS, self._poll_operation_queue)
 
     # ------------------------------------------------------------------ UI
     def _configure_style(self) -> None:
@@ -343,11 +356,32 @@ class DossierPanel(ttk.Frame):
         fields.columnconfigure(1, weight=1)
         fields.columnconfigure(2, weight=1)
         self.sheet_combo = self._combo_field(fields, 0, "Hoja:", self.sheet_var, self._sheet_values)
+        self.sheet_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_excel_metadata())
         self._combo_field(fields, 1, "Columna CP:", self.cp_column_var, ("CP",))
         self._combo_field(fields, 2, "Columna Serie:", self.serie_column_var, ("Serie",))
 
+        filters = ttk.Frame(body, style="CardBody.TFrame")
+        filters.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        filters.columnconfigure(1, weight=1)
+        filters.columnconfigure(3, weight=1)
+        ttk.Label(filters, text="Filtro CP:", style="FieldLabel.TLabel").grid(row=0, column=0, sticky="w", pady=6)
+        self.execution_cp_combo = ttk.Combobox(filters, textvariable=self.execution_cp_filter_var, values=self._execution_cp_values, state="readonly", style="App.TCombobox")
+        self.execution_cp_combo.grid(row=0, column=1, sticky="ew", padx=(8, 16), pady=6)
+        self.execution_cp_combo.bind("<<ComboboxSelected>>", self._on_execution_cp_selected)
+        ttk.Label(filters, text="Filtro Serie:", style="FieldLabel.TLabel").grid(row=0, column=2, sticky="w", pady=6)
+        self.execution_serie_combo = ttk.Combobox(filters, textvariable=self.execution_serie_filter_var, values=self._execution_series_values, state="readonly", style="App.TCombobox")
+        self.execution_serie_combo.grid(row=0, column=3, sticky="ew", padx=(8, 8), pady=6)
+        ttk.Button(filters, text="Limpiar", style="Ghost.TButton", command=self._clear_execution_filters).grid(row=0, column=4, sticky="e", pady=6)
+        tk.Label(
+            filters,
+            text="Seleccion? la CP y luego una de sus series. Si dej?s 'Todas', procesa todo.",
+            bg=PALETTE["surface"],
+            fg=PALETTE["muted"],
+            font=("Segoe UI", 8),
+        ).grid(row=1, column=0, columnspan=5, sticky="w", pady=(2, 0))
+
         status = tk.Frame(body, bg=PALETTE["accent_light"], highlightthickness=1, highlightbackground=PALETTE["line"])
-        status.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        status.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         tk.Label(status, text="✔", bg=PALETTE["accent_light"], fg=PALETTE["success_accent"], font=("Segoe UI", 12)).pack(side="left", padx=(12, 4), pady=10)
         tk.Label(status, textvariable=self.excel_status_var, bg=PALETTE["accent_light"], fg=PALETTE["success_accent"], font=("Segoe UI Semibold", 9)).pack(side="left", padx=(0, 12), pady=10)
 
@@ -489,7 +523,7 @@ class DossierPanel(ttk.Frame):
             ("cp", "CP", 120, "w"),
             ("serie", "Serie", 122, "w"),
             ("carpeta_cp", "Carpeta CP encontrada", 185, "w"),
-            ("serie_planos", "Serie en Planos", 118, "center"),
+            ("serie_planos", "Serie encontrada", 118, "center"),
             ("carpeta_5", "Carpeta 5", 90, "center"),
             ("carpeta_6", "Carpeta 6", 90, "center"),
             ("carpeta_7", "Carpeta 7", 90, "center"),
@@ -673,6 +707,8 @@ class DossierPanel(ttk.Frame):
     def _refresh_excel_metadata(self) -> None:
         excel_path = Path(self.excel_path_var.get().strip())
         if not excel_path.exists():
+            self._excel_rows_cache = []
+            self._populate_execution_filters([])
             self.excel_status_var.set("Excel no encontrado.")
             return
 
@@ -691,10 +727,69 @@ class DossierPanel(ttk.Frame):
             config = self._build_config(simulation_only=True)
             _, rows = self.validator.load_rows(config)
             self._excel_rows_cache = rows
+            self._populate_execution_filters(rows)
             self.excel_status_var.set(f"Excel cargado correctamente. {len(rows)} registro(s) encontrados.")
         except Exception as exc:  # pragma: no cover - UI feedback
             logger.exception("Unable to inspect workbook metadata")
+            self._excel_rows_cache = []
+            self._populate_execution_filters([])
             self.excel_status_var.set(f"Error al cargar Excel: {exc}")
+
+    def _normalize_execution_filter(self, value: str) -> str:
+        raw = (value or "").strip()
+        return "" if raw.lower() == "todas" else raw
+
+    def _populate_execution_filters(self, rows: list[DossierRow]) -> None:
+        cp_values: list[str] = []
+        all_series: list[str] = []
+        series_by_cp: dict[str, list[str]] = {}
+        seen_cps: set[str] = set()
+        seen_series: set[str] = set()
+
+        for row in rows:
+            cp_value = str(row.cp or "").strip()
+            serie_value = str(row.serie or "").strip()
+            if cp_value and cp_value not in seen_cps:
+                seen_cps.add(cp_value)
+                cp_values.append(cp_value)
+            if serie_value and serie_value not in seen_series:
+                seen_series.add(serie_value)
+                all_series.append(serie_value)
+            if cp_value and serie_value:
+                series_by_cp.setdefault(cp_value, [])
+                if serie_value not in series_by_cp[cp_value]:
+                    series_by_cp[cp_value].append(serie_value)
+
+        self._execution_cp_values = tuple(["Todas", *cp_values]) if cp_values else ("Todas",)
+        self._execution_series_by_cp = {cp: tuple(values) for cp, values in series_by_cp.items()}
+        self._execution_series_values = tuple(["Todas", *all_series]) if all_series else ("Todas",)
+
+        if hasattr(self, "execution_cp_combo"):
+            self.execution_cp_combo.configure(values=self._execution_cp_values)
+        current_cp = self._normalize_execution_filter(self.execution_cp_filter_var.get())
+        self.execution_cp_filter_var.set(current_cp if current_cp in cp_values else "Todas")
+        self._refresh_execution_series_options()
+
+    def _refresh_execution_series_options(self) -> None:
+        selected_cp = self._normalize_execution_filter(self.execution_cp_filter_var.get())
+        if selected_cp:
+            available_series = self._execution_series_by_cp.get(selected_cp, ())
+        else:
+            available_series = tuple(value for value in self._execution_series_values if value != "Todas")
+
+        combo_values = tuple(["Todas", *available_series]) if available_series else ("Todas",)
+        if hasattr(self, "execution_serie_combo"):
+            self.execution_serie_combo.configure(values=combo_values)
+        current_serie = self._normalize_execution_filter(self.execution_serie_filter_var.get())
+        self.execution_serie_filter_var.set(current_serie if current_serie in available_series else "Todas")
+
+    def _on_execution_cp_selected(self, _event=None) -> None:
+        self._refresh_execution_series_options()
+
+    def _clear_execution_filters(self) -> None:
+        self.execution_cp_filter_var.set("Todas")
+        self._refresh_execution_series_options()
+        self.execution_serie_filter_var.set("Todas")
 
     # ------------------------------------------------------------------ Config / execution
     def _build_config(self, *, simulation_only: bool) -> DossierConfig:
@@ -728,6 +823,9 @@ class DossierPanel(ttk.Frame):
                 "sheet_name": self.sheet_var.get().strip(),
                 "dossier_folder_name": "06_DOSSIER",
                 "simulation_only": simulation_only,
+                "replace_existing": self.replace_var.get(),
+                "cp_filter": self._normalize_execution_filter(self.execution_cp_filter_var.get()),
+                "serie_filter": self._normalize_execution_filter(self.execution_serie_filter_var.get()),
                 "cp_synonyms": [self.cp_column_var.get().strip() or "CP"],
                 "serie_synonyms": [self.serie_column_var.get().strip() or "Serie"],
                 "pdf_sources": pdf_sources,
@@ -756,27 +854,40 @@ class DossierPanel(ttk.Frame):
 
         try:
             config = self._build_config(simulation_only=simulation_only)
-            phase1_items = self._build_phase1_items(config) if self.use_phase1_var.get() else []
+            self._cancel_requested.clear()
             self._operation_running = True
-            self._current_operation_label = "simulación" if simulation_only else "ejecución real"
-            self._set_running_state(True)
+            self._current_operation_label = "simulaci?n" if simulation_only else "ejecuci?n real"
+            active_button = self.simulate_button if simulation_only else self.real_button
+            self._set_running_state(True, active_button=active_button)
             self._set_operation_progress(0, 0, action_label)
+            self.update_idletasks()
 
             if hasattr(self.winfo_toplevel(), "footer_mode_var"):
-                self.winfo_toplevel().footer_mode_var.set("Simulación" if simulation_only else "Real")
+                self.winfo_toplevel().footer_mode_var.set("Simulaci?n" if simulation_only else "Real")
 
             def progress_update(current: int, total: int, message: str) -> None:
+                if self._cancel_requested.is_set():
+                    raise OperationCancelledError("Operaci?n cancelada por el usuario.")
                 self._operation_queue.put(("progress", (current, total, message)))
 
             def worker() -> None:
                 try:
+                    phase1_items = self._build_phase1_items(config) if self.use_phase1_var.get() else []
+                    if self._cancel_requested.is_set():
+                        self._operation_queue.put(("cancelled", None))
+                        return
                     summary = self.service.run_distribution(
                         config,
                         confirm_real=not simulation_only,
                         phase1_items=phase1_items,
                         progress_callback=progress_update,
                     )
-                    self._operation_queue.put(("done", summary))
+                    if self._cancel_requested.is_set():
+                        self._operation_queue.put(("cancelled", None))
+                    else:
+                        self._operation_queue.put(("done", summary))
+                except OperationCancelledError:
+                    self._operation_queue.put(("cancelled", None))
                 except Exception as exc:  # pragma: no cover - background thread
                     self._operation_queue.put(("error", exc))
 
@@ -795,15 +906,19 @@ class DossierPanel(ttk.Frame):
 
         try:
             config = self._build_config(simulation_only=True)
+            self._cancel_requested.clear()
             self._operation_running = True
-            self._current_operation_label = "validación"
-            self._set_running_state(True)
+            self._current_operation_label = "validaci?n"
+            self._set_running_state(True, active_button=self.validate_button)
             self._set_operation_progress(0, 0, "Validando CP y Series")
+            self.update_idletasks()
 
             if hasattr(self.winfo_toplevel(), "footer_mode_var"):
-                self.winfo_toplevel().footer_mode_var.set("Simulación")
+                self.winfo_toplevel().footer_mode_var.set("Simulaci?n")
 
             def progress_update(current: int, total: int, message: str) -> None:
+                if self._cancel_requested.is_set():
+                    raise OperationCancelledError("Operaci?n cancelada por el usuario.")
                 self._operation_queue.put(("progress", (current, total, message)))
 
             def worker() -> None:
@@ -811,7 +926,12 @@ class DossierPanel(ttk.Frame):
                     _workbook_info, rows = self.validator.load_rows(config)
                     validated_rows = self.validator.validate_paths(config, rows, progress_callback=progress_update)
                     validation_tree = self.validator.build_validation_tree(config, validated_rows)
-                    self._operation_queue.put(("validated", (validated_rows, validation_tree)))
+                    if self._cancel_requested.is_set():
+                        self._operation_queue.put(("cancelled", None))
+                    else:
+                        self._operation_queue.put(("validated", (validated_rows, validation_tree)))
+                except OperationCancelledError:
+                    self._operation_queue.put(("cancelled", None))
                 except Exception as exc:  # pragma: no cover - background thread
                     self._operation_queue.put(("error", exc))
 
@@ -831,9 +951,15 @@ class DossierPanel(ttk.Frame):
             return []
 
         pdf_files = [path for path in folder.rglob("*.pdf") if path.is_file()] if folder.exists() else []
+        pdf_by_series: dict[str, Path] = {}
+        for pdf in pdf_files:
+            normalized_name = normalize_for_match(pdf.name)
+            for token in normalized_name.replace("-", " ").replace("_", " ").split():
+                if token.isdigit() and len(token) >= 6:
+                    pdf_by_series.setdefault(token, pdf)
         items: list[SimpleNamespace] = []
         for row in rows:
-            best_match = next((pdf for pdf in pdf_files if normalize_for_match(row.serie) in normalize_for_match(pdf.name)), None)
+            best_match = pdf_by_series.get(normalize_for_match(row.serie))
             expected_name = f"Certificado de Trazabilidad de Ensayos de Pintura SN {row.serie}.pdf"
             pdf_path = best_match or (folder / expected_name)
             items.append(
@@ -847,11 +973,31 @@ class DossierPanel(ttk.Frame):
         return items
 
     # ------------------------------------------------------------------ Queue / summary
-    def _set_running_state(self, running: bool) -> None:
-        state = "disabled" if running else "normal"
-        for widget in (getattr(self, "validate_button", None), getattr(self, "simulate_button", None), getattr(self, "real_button", None), getattr(self, "cancel_button", None)):
-            if widget is not None:
-                widget.configure(state=state)
+    def _set_running_state(self, running: bool, active_button: ttk.Button | None = None) -> None:
+        action_buttons = [getattr(self, "validate_button", None), getattr(self, "simulate_button", None), getattr(self, "real_button", None)]
+        cancel_button = getattr(self, "cancel_button", None)
+
+        if running:
+            self._active_action_button = active_button
+            for widget in action_buttons:
+                if widget is None:
+                    continue
+                self._default_button_labels.setdefault(widget, widget.cget("text"))
+                widget.configure(state="disabled")
+            if active_button is not None:
+                active_button.configure(state="normal", text=f"{self._default_button_labels.get(active_button, active_button.cget('text'))}...")
+            if cancel_button is not None:
+                self._default_button_labels.setdefault(cancel_button, cancel_button.cget("text"))
+                cancel_button.configure(state="normal")
+            return
+
+        for widget in action_buttons + [cancel_button]:
+            if widget is None:
+                continue
+            widget.configure(state="normal")
+            if widget in self._default_button_labels:
+                widget.configure(text=self._default_button_labels[widget])
+        self._active_action_button = None
 
     def _poll_operation_queue(self) -> None:
         try:
@@ -867,7 +1013,7 @@ class DossierPanel(ttk.Frame):
                     rows, tree_rows = payload
                     self._apply_validation_rows(rows, tree_rows)
                     final_total = max(self._operation_total or len(rows), 1)
-                    self._set_operation_progress(final_total, final_total, "Validación completada")
+                    self._set_operation_progress(final_total, final_total, "Validaci?n completada")
                     self._show_validation_dialog(tree_rows)
                     continue
                 if kind == "done":
@@ -875,26 +1021,39 @@ class DossierPanel(ttk.Frame):
                     self._set_running_state(False)
                     self._apply_summary(payload)
                     final_total = max(payload.planned_actions or len(payload.items), 1)
-                    self._set_operation_progress(final_total, final_total, "Simulación completada" if payload.execution_mode == DossierExecutionMode.SIMULATION else "Ejecución real completada")
+                    self._set_operation_progress(final_total, final_total, "Simulaci?n completada" if payload.execution_mode == DossierExecutionMode.SIMULATION else "Ejecuci?n real completada")
                     self._show_distribution_dialog(payload)
                     if self.open_report_var.get():
                         if getattr(payload, 'simulation_root', '') and payload.execution_mode == DossierExecutionMode.SIMULATION:
-                            self.after(200, lambda: self._open_path(getattr(payload, 'simulation_root', ''), "Simulaci?n"))
+                            simulation_root = Path(getattr(payload, 'simulation_root', ''))
+                            if simulation_root.exists():
+                                self.after(200, lambda: self._open_path(str(simulation_root), "Simulaci?n"))
+                            else:
+                                logger.warning("La carpeta de simulaci?n no existe: %s", simulation_root)
                         else:
                             self.after(200, self.open_report)
-                elif kind == "error":
+                    continue
+                if kind == "cancelled":
                     self._operation_running = False
                     self._set_running_state(False)
-                    self.progress_state_var.set(f"La {self._current_operation_label} falló")
+                    self._stop_progress_animation()
+                    self.progress_state_var.set(f"{self._current_operation_label.capitalize()} cancelada")
+                    self.progress_percent_var.set("Cancelado")
+                    self.processed_var.set("Cancelado")
+                    continue
+                if kind == "error":
+                    self._operation_running = False
+                    self._set_running_state(False)
+                    self.progress_state_var.set(f"La {self._current_operation_label} fall?")
                     logger.exception("Phase 2 execution failed: %s", payload)
                     messagebox.showerror("Fase 2", str(payload))
         except queue.Empty:
             pass
-        self.after(120, self._poll_operation_queue)
+        self.after(QUEUE_POLL_MS, self._poll_operation_queue)
 
     def _apply_summary(self, summary) -> None:
         self._last_summary = summary
-        visible_result_path = str(getattr(summary, 'simulation_root', '') or (summary.report_path if summary.report_path else self.report_path_var.get()))
+        visible_result_path = str(summary.report_path or getattr(summary, 'simulation_root', '') or self.report_path_var.get())
         self.report_path_var.set(visible_result_path)
         self.last_update_var.set(datetime.now().strftime("%d/%m/%Y %H:%M:%S"))
         self._write_log(summary)
@@ -905,14 +1064,14 @@ class DossierPanel(ttk.Frame):
         self._update_counts_from_preview()
         self._refresh_chart()
 
-        processed = max(summary.planned_actions or len(summary.items), 1)
+        processed = len(rows) if rows else max(summary.total_rows, 0)
         self.processed_var.set(f"{processed} / {processed}")
         self.progress_percent_var.set("100%")
         self.progress["value"] = 100
-        self.progress_state_var.set("Simulación completada" if summary.execution_mode == DossierExecutionMode.SIMULATION else "Ejecución real completada")
+        self.progress_state_var.set("Simulaci?n completada" if summary.execution_mode == DossierExecutionMode.SIMULATION else "Ejecuci?n real completada")
 
         if hasattr(self.winfo_toplevel(), "footer_mode_var"):
-            self.winfo_toplevel().footer_mode_var.set("Simulación" if summary.execution_mode == DossierExecutionMode.SIMULATION else "Real")
+            self.winfo_toplevel().footer_mode_var.set("Simulaci?n" if summary.execution_mode == DossierExecutionMode.SIMULATION else "Real")
 
     def _apply_validation_rows(self, rows: list[DossierRow], tree_rows: list[DossierValidationTreeRow]) -> None:
         self._validation_rows_cache = rows
@@ -936,19 +1095,31 @@ class DossierPanel(ttk.Frame):
         total = max(int(total), 0)
         current = max(0, min(int(current), total if total else int(current)))
         self._operation_total = total
-        self.progress.configure(mode="determinate", maximum=100)
-        percent = 0 if total <= 0 and current <= 0 else (100 if total <= 0 else min(100, round((current / total) * 100)))
-        self.progress["value"] = percent
+        if total <= 0:
+            self.progress.configure(mode="indeterminate", maximum=100)
+            self.progress.start(PROGRESS_ANIMATION_MS)
+            self.progress["value"] = 0
+            self.progress_percent_var.set("...")
+            self.processed_var.set("Procesando...")
+        else:
+            self._stop_progress_animation()
+            self.progress.configure(mode="determinate", maximum=100)
+            percent = min(100, round((current / total) * 100))
+            self.progress["value"] = percent
+            self.progress_percent_var.set(f"{percent}%")
+            self.processed_var.set(f"{current} / {total}")
         self.progress_state_var.set(message)
-        self.progress_percent_var.set(f"{percent}%")
-        self.processed_var.set(f"{current} / {total}")
 
     def _update_operation_progress(self, current: int, total: int, message: str) -> None:
         total = max(int(total), 0)
         current = max(0, min(int(current), total if total else int(current)))
         self._operation_total = total
+        if total <= 0:
+            self._set_operation_progress(current, total, message)
+            return
+        self._stop_progress_animation()
         self.progress.configure(mode="determinate", maximum=100)
-        percent = 0 if total <= 0 and current <= 0 else (100 if total <= 0 else min(100, round((current / total) * 100)))
+        percent = min(100, round((current / total) * 100))
         self.progress["value"] = percent
         self.progress_state_var.set(message)
         self.progress_percent_var.set(f"{percent}%")
@@ -987,14 +1158,15 @@ class DossierPanel(ttk.Frame):
         nodes: list[dict[str, object]] = []
         for row in tree_rows:
             row_status_label = STATUS_LABELS.get(row.status, row.status.value.title()) if isinstance(row.status, DossierStatus) else str(row.status)
-            row_detail = f"Estado: {row_status_label} · {row.observation or 'Sin observaciones'}"
+            candidate_count = len(row.candidates)
+            row_detail = f"Estado: {row_status_label} ? {row.observation or 'Sin observaciones'} ? Carpetas CP revisadas: {candidate_count}"
             row_children: list[dict[str, object]] = []
             if row.selected_cp_folder:
                 row_children.append(
                     {
-                        "text": f"Carpeta CP válida: {Path(row.selected_cp_folder).name}",
+                        "text": f"Carpeta CP v?lida: {Path(row.selected_cp_folder).name}",
                         "status": "correct",
-                        "detail": "Carpeta seleccionada para distribución.",
+                        "detail": "Carpeta seleccionada para distribuci?n.",
                         "children": [],
                     }
                 )
@@ -1012,7 +1184,7 @@ class DossierPanel(ttk.Frame):
                     {
                         "text": "Carpeta CP no encontrada",
                         "status": "error",
-                        "detail": f"No se encontró una carpeta candidata para {row.cp}.",
+                        "detail": f"No se encontr? una carpeta candidata para {row.cp}.",
                         "children": [],
                     }
                 )
@@ -1022,20 +1194,24 @@ class DossierPanel(ttk.Frame):
                     {
                         "text": "Sin candidatos CP",
                         "status": "error",
-                        "detail": "No se encontraron carpetas CP candidatas en la ruta raíz.",
+                        "detail": "No se encontraron carpetas CP candidatas en la ruta ra?z.",
                         "children": [],
                     }
                 )
 
             for candidate in row.candidates:
                 candidate_status = "correct" if candidate.valid_for_distribution else ("warning" if candidate.dossier_exists else "error")
+                series_location_nodes = [
+                    {"text": Path(location).name, "status": "correct", "detail": location, "children": []}
+                    for location in getattr(candidate, "series_locations", [])[:20]
+                ]
                 candidate_children = [
-                    {"text": "06_DOSSIER", "status": "correct" if candidate.dossier_exists else "error", "detail": "Sí" if candidate.dossier_exists else "No", "children": []},
-                    {"text": "Planos", "status": "correct" if candidate.planos_exists else "error", "detail": "Sí" if candidate.planos_exists else "No", "children": []},
-                    {"text": "Serie encontrada", "status": "correct" if candidate.series_found else "error", "detail": "Sí" if candidate.series_found else "No", "children": []},
-                    {"text": "Carpeta 5", "status": "correct" if candidate.folder_5_exists else "warning", "detail": "Sí" if candidate.folder_5_exists else "No", "children": []},
-                    {"text": "Carpeta 6", "status": "correct" if candidate.folder_6_exists else "warning", "detail": "Sí" if candidate.folder_6_exists else "No", "children": []},
-                    {"text": "Carpeta 7", "status": "correct" if candidate.folder_7_exists else "warning", "detail": "Sí" if candidate.folder_7_exists else "No", "children": []},
+                    {"text": "06_DOSSIER", "status": "correct" if candidate.dossier_exists else "error", "detail": candidate.dossier_folder or ("S?" if candidate.dossier_exists else "No"), "children": []},
+                    {"text": "Planos", "status": "correct" if candidate.planos_exists else "error", "detail": candidate.planos_folder or ("S?" if candidate.planos_exists else "No"), "children": []},
+                    {"text": "Serie encontrada", "status": "correct" if candidate.series_found else "error", "detail": "S?" if candidate.series_found else "No", "children": series_location_nodes},
+                    {"text": "Carpeta 5", "status": "correct" if candidate.folder_5_exists else "warning", "detail": candidate.folder_5 or "No", "children": []},
+                    {"text": "Carpeta 6", "status": "correct" if candidate.folder_6_exists else "warning", "detail": candidate.folder_6 or "No", "children": []},
+                    {"text": "Carpeta 7", "status": "correct" if candidate.folder_7_exists else "warning", "detail": candidate.folder_7 or "No", "children": []},
                 ]
                 candidate_label = Path(candidate.cp_folder).name if candidate.cp_folder else candidate.cp_folder
                 if candidate.selected:
@@ -1117,7 +1293,7 @@ class DossierPanel(ttk.Frame):
             carpeta_cp = row.cp_folder
         elif row.observation == "CP no encontrada en la ruta documental":
             carpeta_cp = "No encontrada"
-        elif row.observation == "Serie no encontrada en Planos para esta CP":
+        elif row.observation == "Serie no encontrada en 06_DOSSIER para esta CP":
             carpeta_cp = "CP encontrada, serie no localizada"
         elif row.observation == "Existe 06_DOSSIER, pero no se encontró carpeta Planos":
             carpeta_cp = "CP encontrada, pero no existe 06_DOSSIER"
@@ -1140,7 +1316,7 @@ class DossierPanel(ttk.Frame):
         elif row.observation == "CP no encontrada en la ruta documental":
             estado = DossierStatus.SKIPPED
             observacion = row.observation
-        elif row.observation == "Serie no encontrada en Planos para esta CP":
+        elif row.observation == "Serie no encontrada en 06_DOSSIER para esta CP":
             estado = DossierStatus.SKIPPED
             observacion = row.observation
         elif row.observation == "Existe 06_DOSSIER, pero no se encontró carpeta Planos":
@@ -1202,30 +1378,43 @@ class DossierPanel(ttk.Frame):
                     "carpeta_7": "-",
                     "accion": 0,
                     "estado": DossierStatus.SKIPPED,
-                    "observacion": getattr(item, "observation", "") or getattr(item, "skipped_reason", "") or "",
+                    "observacion": "",
+                    "_statuses": [],
+                    "_messages": [],
+                    "_success_messages": [],
+                    "_warning_messages": [],
+                    "_error_messages": [],
+                    "_skipped_messages": [],
                 },
             )
 
             status = getattr(item, "status", DossierStatus.SKIPPED)
-            if STATUS_PRIORITY.get(status, 0) > STATUS_PRIORITY.get(bucket["estado"], 0):
-                bucket["estado"] = status
-            if getattr(item, "observation", ""):
-                bucket["observacion"] = item.observation
-            if getattr(item, "skipped_reason", ""):
-                bucket["observacion"] = item.skipped_reason
+            bucket["_statuses"].append(status)
+
+            message = getattr(item, "observation", "") or getattr(item, "skipped_reason", "") or ""
+            if message:
+                bucket["_messages"].append(message)
+                if status in {DossierStatus.COPIED, DossierStatus.REPLACED, DossierStatus.PLANNED, DossierStatus.VALID, DossierStatus.SIMULATED}:
+                    bucket["_success_messages"].append(message)
+                elif status == DossierStatus.WARNING:
+                    bucket["_warning_messages"].append(message)
+                elif status in {DossierStatus.ERROR, DossierStatus.BLOCKED}:
+                    bucket["_error_messages"].append(message)
+                else:
+                    bucket["_skipped_messages"].append(message)
 
             if getattr(item, "planned_path", ""):
                 planned = Path(item.planned_path)
                 if len(planned.parents) >= 3:
                     bucket["carpeta_cp"] = str(planned.parents[2])
-                bucket["serie_planos"] = "Sí"
+                bucket["serie_planos"] = "S?"
                 target_folder = normalize_for_match(getattr(item, "target_folder", ""))
                 if target_folder.startswith("5"):
-                    bucket["carpeta_5"] = "Sí"
+                    bucket["carpeta_5"] = "S?"
                 elif target_folder.startswith("6"):
-                    bucket["carpeta_6"] = "Sí"
+                    bucket["carpeta_6"] = "S?"
                 elif target_folder.startswith("7"):
-                    bucket["carpeta_7"] = "Sí"
+                    bucket["carpeta_7"] = "S?"
                 if getattr(item, "action_type", None) and getattr(item, "action_type").name in {"COPY", "REPLACE", "PLANNED"}:
                     bucket["accion"] += 1
             elif getattr(item, "rule_name", "") == "phase1-routing" and getattr(item, "status", None) == DossierStatus.SKIPPED:
@@ -1234,15 +1423,58 @@ class DossierPanel(ttk.Frame):
         result: list[dict[str, object]] = []
         for row_number in sorted(grouped):
             bucket = grouped[row_number]
+            statuses = bucket.pop("_statuses", [])
+            success_messages = bucket.pop("_success_messages", [])
+            warning_messages = bucket.pop("_warning_messages", [])
+            error_messages = bucket.pop("_error_messages", [])
+            skipped_messages = bucket.pop("_skipped_messages", [])
+            all_messages = bucket.pop("_messages", [])
+
             action_count = bucket["accion"]
+            has_error = any(status in {DossierStatus.ERROR, DossierStatus.BLOCKED} for status in statuses)
+            has_warning = any(status == DossierStatus.WARNING for status in statuses)
+            has_skipped = any(status == DossierStatus.SKIPPED for status in statuses)
+            success_statuses = [status for status in statuses if status in {DossierStatus.COPIED, DossierStatus.REPLACED, DossierStatus.PLANNED, DossierStatus.VALID, DossierStatus.SIMULATED}]
+            has_success = bool(success_statuses)
+
+            if has_error:
+                bucket["estado"] = DossierStatus.ERROR
+                bucket["observacion"] = error_messages[-1] if error_messages else (all_messages[-1] if all_messages else "La fila present? errores.")
+            elif has_success and (has_warning or has_skipped):
+                bucket["estado"] = DossierStatus.WARNING
+                success_total = len(success_statuses)
+                skipped_total = sum(1 for status in statuses if status in {DossierStatus.WARNING, DossierStatus.SKIPPED})
+                detail_message = warning_messages[-1] if warning_messages else (skipped_messages[-1] if skipped_messages else "Revis? el detalle.")
+                bucket["observacion"] = f"Se agregaron correctamente {success_total} documento(s). {skipped_total} quedaron pendientes u omitidos. {detail_message}"
+            elif has_success:
+                bucket["estado"] = self._best_success_status(success_statuses)
+                bucket["observacion"] = success_messages[-1] if success_messages else "Agregado correctamente."
+            elif has_warning:
+                bucket["estado"] = DossierStatus.WARNING
+                bucket["observacion"] = warning_messages[-1] if warning_messages else "Revis? el detalle de la fila."
+            else:
+                bucket["estado"] = DossierStatus.SKIPPED
+                bucket["observacion"] = skipped_messages[-1] if skipped_messages else (all_messages[-1] if all_messages else "No se agreg? ning?n documento.")
+
             if bucket["estado"] == DossierStatus.VALID and action_count == 0:
                 action_count = 4 if self.use_phase1_var.get() else 3
             bucket["accion"] = f"{action_count} documentos" if action_count else "0 documentos"
-            bucket["serie_planos"] = "Sí" if bucket["estado"] in {DossierStatus.VALID, DossierStatus.PLANNED, DossierStatus.COPIED, DossierStatus.REPLACED} else bucket["serie_planos"]
-            if bucket["estado"] == DossierStatus.VALID and bucket["observacion"] in {"", "Ready"}:
-                bucket["observacion"] = "Lista para copiar"
+            if has_success:
+                bucket["serie_planos"] = "S?"
             result.append(bucket)
         return result
+
+    @staticmethod
+    def _best_success_status(statuses: list[DossierStatus]) -> DossierStatus:
+        if DossierStatus.REPLACED in statuses:
+            return DossierStatus.REPLACED
+        if DossierStatus.COPIED in statuses:
+            return DossierStatus.COPIED
+        if DossierStatus.PLANNED in statuses:
+            return DossierStatus.PLANNED
+        if DossierStatus.SIMULATED in statuses:
+            return DossierStatus.SIMULATED
+        return DossierStatus.VALID
 
     def _update_counts_from_preview(self) -> None:
         counts = Counter(record["estado"] for record in self.preview_records)
@@ -1340,7 +1572,8 @@ class DossierPanel(ttk.Frame):
                 return
             messagebox.showinfo(label, str(path))
         except Exception as exc:  # pragma: no cover - platform specific
-            messagebox.showerror(label, str(exc))
+            logger.exception("No se pudo abrir la ruta %s", path)
+            messagebox.showerror(label, f"No se pudo abrir la ruta:\n{path}\n\n{exc}")
 
 
 class DossierResultDialog(tk.Toplevel):
@@ -1423,7 +1656,7 @@ class DossierResultDialog(tk.Toplevel):
                 ("cp", "CP", 120),
                 ("serie", "Serie", 120),
                 ("carpeta_cp", "Carpeta CP", 180),
-                ("serie_planos", "Serie en Planos", 100),
+                ("serie_planos", "Serie encontrada", 110),
                 ("carpeta_5", "5", 55),
                 ("carpeta_6", "6", 55),
                 ("carpeta_7", "7", 55),
@@ -1501,7 +1734,7 @@ class DossierResultDialog(tk.Toplevel):
                 DossierStatus.ERROR: "error",
                 DossierStatus.BLOCKED: "error",
                 DossierStatus.SKIPPED: "skipped",
-                DossierStatus.SIMULATED: "skipped",
+                DossierStatus.SIMULATED: "correct",
             }.get(status, "skipped")
         if isinstance(status, str):
             return status if status in {"correct", "warning", "error", "skipped"} else "skipped"

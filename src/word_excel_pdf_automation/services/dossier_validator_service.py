@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+import os
 from dataclasses import dataclass, field
 import re
 from pathlib import Path
@@ -35,6 +36,7 @@ class DossierValidationCandidate:
     folder_5: str = ""
     folder_6: str = ""
     folder_7: str = ""
+    series_locations: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -73,10 +75,50 @@ class DossierValidatorService:
         if not root_path.exists():
             return []
         runtime_index = self._build_runtime_index(root_path)
-        return [candidate.cp_folder for candidate in self._match_cp_candidates(runtime_index, cp)]
+        unique_matches: list[Path] = []
+        seen_paths: set[str] = set()
+        for candidate in self._match_cp_candidates(runtime_index, cp):
+            path_key = str(candidate.cp_folder)
+            if path_key in seen_paths:
+                continue
+            seen_paths.add(path_key)
+            unique_matches.append(candidate.cp_folder)
+        return unique_matches
 
     def find_dossier_folder(self, cp_folder: Path) -> Path | None:
-        return self._find_unique_child_match(cp_folder, "06_DOSSIER")[0]
+        dossier_folders = self.find_dossier_folders(cp_folder)
+        return dossier_folders[0] if dossier_folders else None
+
+    def find_dossier_folders(self, cp_folder: Path) -> list[Path]:
+        if not cp_folder.is_dir():
+            return []
+        matches: list[tuple[Path, float, int]] = []
+        seen_paths: set[str] = set()
+        for root, dirs, _files in self._safe_walk(cp_folder):
+            root_score = self._score_directory_name(root.name, "06_DOSSIER")
+            if root_score >= 0.45:
+                path_key = str(root)
+                if path_key not in seen_paths:
+                    seen_paths.add(path_key)
+                    matches.append((root, root_score + 0.2, len(root.parts)))
+            elif self._looks_like_distribution_root(root, dirs):
+                path_key = str(root)
+                if path_key not in seen_paths:
+                    seen_paths.add(path_key)
+                    matches.append((root, 0.65, len(root.parts)))
+
+            for directory_name in dirs:
+                candidate = root / directory_name
+                score = self._score_directory_name(directory_name, "06_DOSSIER")
+                if score < 0.45:
+                    continue
+                path_key = str(candidate)
+                if path_key in seen_paths:
+                    continue
+                seen_paths.add(path_key)
+                matches.append((candidate, score, len(candidate.parts)))
+        matches.sort(key=lambda item: (-item[1], item[2], str(item[0])))
+        return [path for path, _score, _depth in matches]
 
     def find_planos_folder(self, dossier_folder: Path) -> Path | None:
         return self._find_unique_child_match(dossier_folder, "Planos")[0]
@@ -105,13 +147,13 @@ class DossierValidatorService:
         return None
 
     def find_folder_5(self, dossier_folder: Path) -> Path | None:
-        return self._find_phase2_folder(dossier_folder, ("5 Procedimiento de fabricaci?n", "5 Procedimiento de fabricacion", "Procedimiento de fabricaci?n", "Procedimiento de fabricacion", "5", "05"))
+        return self._find_phase2_folder(dossier_folder, ("5 Procedimiento de fabricaci?n", "5 Procedimiento de fabricacion", "Procedimiento de fabricaci?n", "Procedimiento de fabricacion", "5 Procedimiento de fabricaci?n", "Procedimiento de fabricaci?n", "5", "05"))
 
     def find_folder_6(self, dossier_folder: Path) -> Path | None:
-        return self._find_phase2_folder(dossier_folder, ("6 Trazabilidad", "Trazabilidad", "6", "06"))
+        return self._find_phase2_folder(dossier_folder, ("6 Trazabilidad", "Trazabilidad", "6 Registros de informe de inspecci?n", "6 Registros de informe de inspeccion", "6 Registros Informes de Inspecci?n", "6 Registros Informes de Inspeccion", "Registros de informe de inspecci?n", "Registros de informe de inspeccion", "Registros Informes de Inspecci?n", "Registros Informes de Inspeccion", "6", "06"))
 
     def find_folder_7(self, dossier_folder: Path) -> Path | None:
-        return self._find_phase2_folder(dossier_folder, ("7 Ensayos", "Ensayos", "7", "07"))
+        return self._find_phase2_folder(dossier_folder, ("7 Ensayos", "Ensayos", "7 Pruebas El?ctricas", "7 Pruebas Electricas", "Pruebas El?ctricas", "Pruebas Electricas", "7", "07"))
 
     def inspect_workbook(self, config: DossierConfig) -> DossierWorkbookInfo:
         workbook = load_workbook(config.excel_path, read_only=True, data_only=True)
@@ -168,13 +210,23 @@ class DossierValidatorService:
 
     def validate_paths(self, config: DossierConfig, rows: list[DossierRow], progress_callback=None) -> list[DossierRow]:
         total = len(rows)
-        runtime_index = self._build_runtime_index(config.root_path, requested_cps=[row.cp for row in rows])
+        root_candidates = list(self._iter_directory_candidates(config.root_path, max_depth=1))
+        index_total = max(len(root_candidates), 1)
+        overall_total = max(index_total + total, 1)
+        if progress_callback:
+            progress_callback(0, overall_total, "Indexando carpetas CP...")
+
+        def index_progress(current: int, total_candidates: int, message: str) -> None:
+            if progress_callback:
+                progress_callback(current, overall_total, message)
+
+        runtime_index = self._build_runtime_index(config.root_path, requested_cps=[row.cp for row in rows], progress_callback=index_progress, preloaded_root_candidates=root_candidates)
         inspection_cache: dict[tuple[str, str], tuple[Path | None, str, list[DossierValidationCandidate]]] = {}
 
         for index, row in enumerate(rows, start=1):
             if row.status in {DossierStatus.ERROR, DossierStatus.SKIPPED}:
                 if progress_callback:
-                    progress_callback(index, total, f"Fila {row.row_number} validada")
+                    progress_callback(index_total + index, overall_total, f"Fila {row.row_number} validada")
                 continue
 
             cache_key = (row.normalized_cp, self._normalize_series_key(row.serie))
@@ -199,9 +251,9 @@ class DossierValidatorService:
                 if not candidate_details:
                     row.status = DossierStatus.SKIPPED
                     row.observation = f"Carpeta CP no encontrada en {config.root_path}"
-                elif any(candidate.planos_exists for candidate in candidate_details):
+                elif any(candidate.planos_exists or candidate.folder_6_exists for candidate in candidate_details):
                     row.status = DossierStatus.SKIPPED
-                    row.observation = "Serie no encontrada en Planos para esta CP"
+                    row.observation = "Serie no encontrada en 06_DOSSIER para esta CP"
                 elif any(candidate.dossier_exists for candidate in candidate_details):
                     row.status = DossierStatus.SKIPPED
                     row.observation = "Existe 06_DOSSIER, pero no se encontr? carpeta Planos"
@@ -209,7 +261,7 @@ class DossierValidatorService:
                     row.status = DossierStatus.SKIPPED
                     row.observation = "Carpeta CP encontrada, pero no existe 06_DOSSIER"
                 if progress_callback:
-                    progress_callback(index, total, f"Fila {row.row_number} validada")
+                    progress_callback(index_total + index, overall_total, f"Fila {row.row_number} validada")
                 continue
 
             primary_candidate = valid_candidates[0]
@@ -228,7 +280,7 @@ class DossierValidatorService:
             row.status = DossierStatus.VALID
             row.observation = "Validada" if len(valid_candidates) == 1 else f"Validada en {len(valid_candidates)} carpetas"
             if progress_callback:
-                progress_callback(index, total, f"Fila {row.row_number} validada")
+                progress_callback(index_total + index, overall_total, f"Fila {row.row_number} validada")
 
         return rows
 
@@ -301,7 +353,7 @@ class DossierValidatorService:
 
         for entry in candidate_entries:
             series_found = self._series_found_in_candidate(entry, target_series_key)
-            valid_for_distribution = bool(entry.dossier_folder and entry.planos_folder and series_found)
+            valid_for_distribution = bool(entry.dossier_folder and series_found)
             if valid_for_distribution:
                 valid_paths.append(entry.cp_folder)
             candidates.append(
@@ -321,6 +373,7 @@ class DossierValidatorService:
                     folder_5=str(entry.folder_5) if entry.folder_5 else "",
                     folder_6=str(entry.folder_6) if entry.folder_6 else "",
                     folder_7=str(entry.folder_7) if entry.folder_7 else "",
+                    series_locations=[str(path) for path in self._find_series_locations(entry, target_series_key)],
                 )
             )
 
@@ -339,16 +392,19 @@ class DossierValidatorService:
         if planos_folder is None:
             return "Existe 06_DOSSIER, pero no se encontr? carpeta Planos."
         if not series_found:
-            return "Existe Planos, pero la serie no se encontr? en esta candidata."
+            return "La serie no se encontr? en esta carpeta CP."
         if valid_for_distribution:
             return "Carpeta v?lida para distribuci?n."
         return "Candidata no v?lida para distribuci?n."
 
     def _find_phase2_folder(self, dossier_folder: Path, terms: tuple[str, ...]) -> Path | None:
-        if not dossier_folder.exists():
+        if not dossier_folder.is_dir():
             return None
         numbered_terms = {self._extract_leading_number(term) for term in terms if self._extract_leading_number(term)}
-        candidates = [item for item in dossier_folder.iterdir() if item.is_dir()]
+        try:
+            candidates = [item for item in dossier_folder.iterdir() if item.is_dir()]
+        except OSError:
+            return None
         if numbered_terms:
             numbered_candidates = [candidate for candidate in candidates if self._extract_leading_number(candidate.name) in numbered_terms]
             if numbered_candidates:
@@ -382,9 +438,15 @@ class DossierValidatorService:
 
     @staticmethod
     def _extract_cp_code(value: str) -> str:
+        normalized_raw = normalize_series(value).strip()
+        if normalized_raw.isdigit():
+            return normalized_raw
         normalized_value = normalize_for_match(value)
         match = _CP_IDENTIFIER_PATTERN.search(normalized_value)
-        return match.group("code") if match else ""
+        if match:
+            return match.group("code")
+        leading_digits = re.match(r"^\s*(\d{5,})", normalized_raw)
+        return leading_digits.group(1) if leading_digits else ""
 
     @staticmethod
     def _resolve_worksheet(workbook, config: DossierConfig):
@@ -393,15 +455,16 @@ class DossierValidatorService:
         return workbook[workbook.sheetnames[0]]
 
     def _find_unique_child_match(self, parent: Path, target: str) -> tuple[Path | None, str]:
-        if not parent.exists():
+        if not parent.is_dir():
             return None, "missing"
-        target_key = normalize_for_match(target)
         best_paths: list[Path] = []
         best_score = 0.0
-        for candidate in (item for item in parent.iterdir() if item.is_dir()):
-            score = similarity(candidate.name, target_key)
-            if target_key in normalize_for_match(candidate.name):
-                score += 0.5
+        try:
+            candidates = [item for item in parent.iterdir() if item.is_dir()]
+        except OSError:
+            return None, "missing"
+        for candidate in candidates:
+            score = self._score_directory_name(candidate.name, target)
             if score < 0.45:
                 continue
             if score > best_score + 1e-9:
@@ -430,8 +493,11 @@ class DossierValidatorService:
             except OSError:
                 continue
             for child in children:
-                if child.is_dir():
-                    stack.append((child, depth + 1))
+                try:
+                    if child.is_dir():
+                        stack.append((child, depth + 1))
+                except OSError:
+                    continue
 
     def _iter_path_candidates(self, root_path: Path, max_depth: int = 5, include_files: bool = False):
         stack = [(root_path, 0)]
@@ -448,10 +514,14 @@ class DossierValidatorService:
             except OSError:
                 continue
             for child in children:
-                if child.is_dir() or include_files:
+                try:
+                    is_directory = child.is_dir()
+                except OSError:
+                    continue
+                if is_directory or include_files:
                     stack.append((child, depth + 1))
 
-    def _build_runtime_index(self, root_path: Path, requested_cps: Iterable[str] | None = None) -> DossierRuntimeIndex:
+    def _build_runtime_index(self, root_path: Path, requested_cps: Iterable[str] | None = None, progress_callback=None, preloaded_root_candidates: list[Path] | None = None) -> DossierRuntimeIndex:
         candidates: list[DossierIndexedCandidate] = []
         cp_code_lookup: dict[str, list[DossierIndexedCandidate]] = defaultdict(list)
 
@@ -465,7 +535,13 @@ class DossierValidatorService:
                 else:
                     requested_names.append(normalize_for_match(cp))
 
-        for cp_folder in sorted(self._iter_directory_candidates(root_path, max_depth=1), key=lambda item: len(str(item))):
+        root_candidates = preloaded_root_candidates if preloaded_root_candidates is not None else list(self._iter_directory_candidates(root_path, max_depth=1))
+        sorted_candidates = sorted(root_candidates, key=lambda item: len(str(item)))
+        total_candidates = max(len(sorted_candidates), 1)
+
+        for scan_index, cp_folder in enumerate(sorted_candidates, start=1):
+            if progress_callback:
+                progress_callback(scan_index, total_candidates, f"Indexando CP: {cp_folder.name}")
             cp_name_key = normalize_for_match(cp_folder.name)
             cp_code = self._extract_cp_code(cp_folder.name)
 
@@ -478,33 +554,44 @@ class DossierValidatorService:
                 if not matches_requested:
                     continue
 
-            dossier_folder = self.find_dossier_folder(cp_folder)
-            planos_folder = self.find_planos_folder(dossier_folder) if dossier_folder else None
-            folder_5 = self.find_folder_5(dossier_folder) if dossier_folder else None
-            folder_6 = self.find_folder_6(dossier_folder) if dossier_folder else None
-            folder_7 = self.find_folder_7(dossier_folder) if dossier_folder else None
-            series_keys: list[str] = []
-            if planos_folder:
-                seen_series: set[str] = set()
-                for candidate in self._iter_path_candidates(planos_folder, max_depth=5, include_files=True):
-                    series_key = self._normalize_series_key(candidate.name)
-                    if series_key and series_key not in seen_series:
-                        seen_series.add(series_key)
-                        series_keys.append(series_key)
-            indexed = DossierIndexedCandidate(
-                cp_folder=cp_folder,
-                cp_name_key=cp_name_key,
-                cp_code=cp_code,
-                dossier_folder=dossier_folder,
-                planos_folder=planos_folder,
-                folder_5=folder_5,
-                folder_6=folder_6,
-                folder_7=folder_7,
-                series_keys=tuple(series_keys),
-            )
-            candidates.append(indexed)
-            if indexed.cp_code:
-                cp_code_lookup[indexed.cp_code].append(indexed)
+            dossier_folders = self.find_dossier_folders(cp_folder)
+            if not dossier_folders:
+                indexed = DossierIndexedCandidate(
+                    cp_folder=cp_folder,
+                    cp_name_key=cp_name_key,
+                    cp_code=cp_code,
+                    dossier_folder=None,
+                    planos_folder=None,
+                    folder_5=None,
+                    folder_6=None,
+                    folder_7=None,
+                    series_keys=(),
+                )
+                candidates.append(indexed)
+                if indexed.cp_code:
+                    cp_code_lookup[indexed.cp_code].append(indexed)
+                continue
+
+            for dossier_folder in dossier_folders:
+                planos_folder = self.find_planos_folder(dossier_folder)
+                folder_5 = self.find_folder_5(dossier_folder)
+                folder_6 = self.find_folder_6(dossier_folder)
+                folder_7 = self.find_folder_7(dossier_folder)
+                series_keys = self._collect_series_keys(dossier_folder)
+                indexed = DossierIndexedCandidate(
+                    cp_folder=cp_folder,
+                    cp_name_key=cp_name_key,
+                    cp_code=cp_code,
+                    dossier_folder=dossier_folder,
+                    planos_folder=planos_folder,
+                    folder_5=folder_5,
+                    folder_6=folder_6,
+                    folder_7=folder_7,
+                    series_keys=tuple(series_keys),
+                )
+                candidates.append(indexed)
+                if indexed.cp_code:
+                    cp_code_lookup[indexed.cp_code].append(indexed)
 
         return DossierRuntimeIndex(candidates=tuple(candidates), cp_code_lookup={key: tuple(value) for key, value in cp_code_lookup.items()})
 
@@ -524,6 +611,83 @@ class DossierValidatorService:
         if not target_series_key:
             return False
         return any(target_series_key in series_key for series_key in candidate.series_keys)
+
+    def _find_series_locations(self, candidate: DossierIndexedCandidate, target_series_key: str) -> list[Path]:
+        if not target_series_key or not candidate.dossier_folder:
+            return []
+        matches: list[Path] = []
+        for root, dirs, files in self._safe_walk(candidate.dossier_folder):
+            for directory_name in dirs:
+                if target_series_key in self._normalize_series_key(directory_name):
+                    matches.append(root / directory_name)
+            for file_name in files:
+                if target_series_key in self._normalize_series_key(file_name):
+                    matches.append(root / file_name)
+        return matches
+
+    def _looks_like_distribution_root(self, candidate: Path, child_dirs: list[str]) -> bool:
+        if not child_dirs:
+            return False
+        has_planos = False
+        has_distribution_folder = False
+        for child_name in child_dirs:
+            normalized = normalize_for_match(child_name)
+            if "planos" in normalized:
+                has_planos = True
+            if normalized.startswith("5") or normalized.startswith("6") or normalized.startswith("7"):
+                has_distribution_folder = True
+        return has_planos and has_distribution_folder
+
+    def _collect_series_keys(self, dossier_folder: Path) -> tuple[str, ...]:
+        seen_series: set[str] = set()
+        series_keys: list[str] = []
+        for root, dirs, files in self._safe_walk(dossier_folder):
+            for directory_name in dirs:
+                series_key = self._normalize_series_key(directory_name)
+                if series_key and series_key not in seen_series:
+                    seen_series.add(series_key)
+                    series_keys.append(series_key)
+            for file_name in files:
+                series_key = self._normalize_series_key(file_name)
+                if series_key and series_key not in seen_series:
+                    seen_series.add(series_key)
+                    series_keys.append(series_key)
+        return tuple(series_keys)
+
+    def _safe_walk(self, root_path: Path):
+        if not root_path.is_dir():
+            return
+        try:
+            walker = os.walk(root_path, topdown=True, onerror=lambda _error: None)
+        except OSError:
+            return
+        for current_root, dirs, files in walker:
+            current_path = Path(current_root)
+            filtered_dirs: list[str] = []
+            for directory_name in list(dirs):
+                if directory_name.lower() == '_backups':
+                    continue
+                try:
+                    candidate = current_path / directory_name
+                    if candidate.is_dir():
+                        filtered_dirs.append(directory_name)
+                except OSError:
+                    continue
+            dirs[:] = filtered_dirs
+            yield current_path, list(dirs), list(files)
+
+    @staticmethod
+    def _score_directory_name(candidate_name: str, target: str) -> float:
+        target_key = normalize_for_match(target)
+        candidate_key = normalize_for_match(candidate_name)
+        score = similarity(candidate_name, target_key)
+        if target_key in candidate_key:
+            score += 0.5
+        target_number = DossierValidatorService._extract_leading_number(target)
+        candidate_number = DossierValidatorService._extract_leading_number(candidate_name)
+        if target_number and candidate_number == target_number:
+            score += 0.25
+        return score
 
     @staticmethod
     def _normalize_series_key(value: str) -> str:

@@ -1,0 +1,58 @@
+schema: spec-driven
+
+context: |
+  Tech stack: Python 3.11+ desktop app.
+  UI: Tkinter.
+  Core libraries: openpyxl, python-docx, docx2pdf, pywin32.
+  Architecture: UI + services + models + utilities.
+  Flow: Phase 1 document generation; Phase 2 dossier simulation-first.
+  Testing: no test runner, no test files, no lint/type/format config detected.
+  Style: type-annotated modules, dataclasses, Windows-oriented path handling.
+
+strict_tdd: false
+
+testing:
+  detected: 2026-07-08
+  test_runner:
+    command: ""
+    framework: "none detected"
+  layers:
+    unit:
+      available: false
+      tool: "—"
+    integration:
+      available: false
+      tool: "—"
+    e2e:
+      available: false
+      tool: "—"
+  coverage:
+    available: false
+    command: "—"
+  quality_tools:
+    linter:
+      available: false
+      command: "—"
+    type_checker:
+      available: false
+      command: "—"
+    formatter:
+      available: false
+      command: "—"
+
+rules:
+  proposal:
+    - Keep change scope small and reversible.
+  specs:
+    - Use Given/When/Then and RFC 2119 terms.
+  design:
+    - Explain the service boundaries and file impact.
+  tasks:
+    - Group by phase and keep tasks session-sized.
+  apply:
+    - Follow existing Python patterns.
+    - TDD is disabled until a real test runner exists.
+  verify:
+    - No standard test command is available yet.
+  archive:
+    - Preserve traceability in the archive path.

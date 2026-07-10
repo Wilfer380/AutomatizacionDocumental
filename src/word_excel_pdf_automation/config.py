@@ -19,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TEMPLATE_PATH = Path(r"C:\Users\wandica\Downloads\Trazabilidad descrptivo pintura - serie.docx")
 DEFAULT_EXCEL_PATH = Path(r"C:\Users\wandica\Downloads\Listado equipos SLA COL.xlsx")
 DEFAULT_OUTPUT_DIR = Path(r"C:\Users\wandica\Downloads\word_excel_pdf_output")
+DEFAULT_DOSSIER_SIMULATION_DIR = DEFAULT_OUTPUT_DIR / "DossierSimulation"
 
 DEFAULT_DOSSIER_ROOT_PATH = Path(r"Q:\GROUPS\CO_MDE_DISENO_DI\01_ORDERS\02_DOCUMENTS_APPROVAL_CERTIFIED")
 DEFAULT_DOSSIER_EXCEL_PATH = Path(r"C:\Users\wandica\Downloads\Listado equipos SLA COL.xlsx")
