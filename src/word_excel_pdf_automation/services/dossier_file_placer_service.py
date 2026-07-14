@@ -18,7 +18,10 @@ class DossierFilePlacerService:
         blocked = 0
         valid_rows = 0
         source_lookup = self._build_source_lookup(config.pdf_sources)
-        total_actions = self._estimate_planned_actions(config, rows)
+        rules = [rule for rule in self.sequence_service.sort_rules(config.rules) if self._is_phase2_folder(rule.target_folder)]
+        total_actions = self._estimate_planned_actions(config, rows, rules)
+        planned_destinations: set[str] = set()
+
         for row in rows:
             if row.status == DossierStatus.BLOCKED:
                 blocked += 1
@@ -35,17 +38,30 @@ class DossierFilePlacerService:
                 items.append(self._build_validation_result(row, DossierStatus.SKIPPED))
                 self._notify(progress_callback, len(items), total_actions, row)
                 continue
+
             valid_rows += 1
             for target in self._iter_targets(row):
-                for rule in self.sequence_service.sort_rules(config.rules):
-                    if not self._is_phase2_folder(rule.target_folder):
-                        continue
+                for rule in rules:
                     actual_target_folder = self._resolve_target_folder(rule.target_folder, target)
                     if actual_target_folder is None:
                         warnings += 1
-                        items.append(DossierActionResult(row_number=row.row_number, cp=row.cp, serie=row.serie, rule_name=rule.name, target_folder="", planned_path="", action_type=DossierActionType.SKIPPED, status=DossierStatus.SKIPPED, skipped_reason="No se encontr? la carpeta destino dentro del dossier.", observation="Falta la carpeta destino durante la planificaci?n."))
+                        items.append(
+                            DossierActionResult(
+                                row_number=row.row_number,
+                                cp=row.cp,
+                                serie=row.serie,
+                                rule_name=rule.name,
+                                target_folder="",
+                                planned_path="",
+                                action_type=DossierActionType.SKIPPED,
+                                status=DossierStatus.SKIPPED,
+                                skipped_reason="No se encontró la carpeta destino dentro del dossier.",
+                                observation="Falta la carpeta destino durante la planificación.",
+                            )
+                        )
                         self._notify(progress_callback, len(items), total_actions, row)
                         continue
+
                     source_pdf = source_lookup.get(normalize_for_match(rule.name)) or source_lookup.get(normalize_for_match(rule.target_folder))
                     source_path = Path(source_pdf.source_pdf_path) if source_pdf else Path()
                     if not source_pdf or not source_path.is_file():
@@ -54,27 +70,113 @@ class DossierFilePlacerService:
                             errors += 1
                         else:
                             warnings += 1
-                        items.append(DossierActionResult(row_number=row.row_number, cp=row.cp, serie=row.serie, rule_name=rule.name, target_folder=str(actual_target_folder), planned_path=str(actual_target_folder / self.sequence_service.build_destination_filename(row, rule)), source_pdf_path=str(source_path) if source_pdf else "", action_type=DossierActionType.SKIPPED, status=missing_status, skipped_reason="Falta el PDF de origen obligatorio." if missing_status == DossierStatus.ERROR else "Falta el PDF de origen opcional.", observation="Falta el PDF de origen durante la planificaci?n."))
+                        items.append(
+                            DossierActionResult(
+                                row_number=row.row_number,
+                                cp=row.cp,
+                                serie=row.serie,
+                                rule_name=rule.name,
+                                target_folder=str(actual_target_folder),
+                                planned_path=str(actual_target_folder / self.sequence_service.build_destination_filename(row, rule)),
+                                source_pdf_path=str(source_path) if source_pdf else "",
+                                action_type=DossierActionType.SKIPPED,
+                                status=missing_status,
+                                skipped_reason="Falta el PDF de origen obligatorio." if missing_status == DossierStatus.ERROR else "Falta el PDF de origen opcional.",
+                                observation="Falta el PDF de origen durante la planificación.",
+                            )
+                        )
                         self._notify(progress_callback, len(items), total_actions, row)
                         continue
+
                     effective_rule = rule
                     if source_pdf.final_name_pattern:
-                        effective_rule = type(rule)(order=rule.order, name=rule.name, target_folder=rule.target_folder, pdf_name_pattern=source_pdf.final_name_pattern, enabled=rule.enabled, notes=rule.notes)
+                        effective_rule = type(rule)(
+                            order=rule.order,
+                            name=rule.name,
+                            target_folder=rule.target_folder,
+                            pdf_name_pattern=source_pdf.final_name_pattern,
+                            enabled=rule.enabled,
+                            notes=rule.notes,
+                        )
+
                     planned_path = actual_target_folder / self.sequence_service.build_destination_filename(row, effective_rule)
-                    existing_path, replace_note = self._detect_existing_destination(rule, planned_path)
-                    if existing_path and not config.replace_existing:
+                    destination_key = self._build_destination_key(planned_path)
+                    if destination_key in planned_destinations:
+                        continue
+
+                    destination_state, existing_path, replace_note = self._detect_existing_destination(rule, planned_path)
+                    if destination_state == "final_exists":
                         warnings += 1
-                        items.append(DossierActionResult(row_number=row.row_number, cp=row.cp, serie=row.serie, rule_name=rule.name, target_folder=str(actual_target_folder), planned_path=str(planned_path), source_pdf_path=str(source_pdf.source_pdf_path), action_type=DossierActionType.SKIPPED, status=DossierStatus.SKIPPED, skipped_reason=f"Ya existe un documento destino: {existing_path.name}", observation=f"No se puede agregar ya que el documento ya est? agregado en {existing_path.parent}."))
+                        items.append(
+                            DossierActionResult(
+                                row_number=row.row_number,
+                                cp=row.cp,
+                                serie=row.serie,
+                                rule_name=rule.name,
+                                target_folder=str(actual_target_folder),
+                                planned_path=str(planned_path),
+                                source_pdf_path=str(source_pdf.source_pdf_path),
+                                action_type=DossierActionType.SKIPPED,
+                                status=DossierStatus.SKIPPED,
+                                skipped_reason=f"El documento final ya existe: {planned_path.name}",
+                                observation=f"No se puede agregar ni reemplazar porque el documento ya está correcto en {planned_path.parent}.",
+                            )
+                        )
                         self._notify(progress_callback, len(items), total_actions, row)
                         continue
-                    observation = "Planificado en modo simulaci?n"
+
+                    if destination_state == "legacy_exists" and not config.replace_existing:
+                        warnings += 1
+                        items.append(
+                            DossierActionResult(
+                                row_number=row.row_number,
+                                cp=row.cp,
+                                serie=row.serie,
+                                rule_name=rule.name,
+                                target_folder=str(actual_target_folder),
+                                planned_path=str(planned_path),
+                                source_pdf_path=str(source_pdf.source_pdf_path),
+                                action_type=DossierActionType.SKIPPED,
+                                status=DossierStatus.SKIPPED,
+                                skipped_reason=f"Ya existe un documento destino: {existing_path.name}",
+                                observation=f"No se puede reemplazar porque ya existe un documento en {planned_path.parent} y la opción de reemplazo está desactivada.",
+                            )
+                        )
+                        self._notify(progress_callback, len(items), total_actions, row)
+                        continue
+
+                    planned_destinations.add(destination_key)
+                    observation = "Planificado en modo simulación"
                     action_type = DossierActionType.PLANNED
-                    if existing_path:
-                        observation = replace_note or f"Se reemplazar? el documento existente {existing_path.name}."
+                    if destination_state == "legacy_exists" and existing_path is not None:
+                        observation = replace_note or f"Se reemplazará el documento existente {existing_path.name}."
                         action_type = DossierActionType.REPLACE
-                    items.append(DossierActionResult(row_number=row.row_number, cp=row.cp, serie=row.serie, rule_name=rule.name, target_folder=str(actual_target_folder), planned_path=str(planned_path), source_pdf_path=str(source_pdf.source_pdf_path), action_type=action_type, status=DossierStatus.PLANNED, observation=observation))
+
+                    items.append(
+                        DossierActionResult(
+                            row_number=row.row_number,
+                            cp=row.cp,
+                            serie=row.serie,
+                            rule_name=rule.name,
+                            target_folder=str(actual_target_folder),
+                            planned_path=str(planned_path),
+                            source_pdf_path=str(source_pdf.source_pdf_path),
+                            action_type=action_type,
+                            status=DossierStatus.PLANNED,
+                            observation=observation,
+                        )
+                    )
                     self._notify(progress_callback, len(items), total_actions, row)
-        return DossierRunSummary(total_rows=len(rows), valid_rows=valid_rows, warnings=warnings, errors=errors, blocked=blocked, planned_actions=len(items), items=items)
+
+        return DossierRunSummary(
+            total_rows=len(rows),
+            valid_rows=valid_rows,
+            warnings=warnings,
+            errors=errors,
+            blocked=blocked,
+            planned_actions=len(items),
+            items=items,
+        )
 
     @staticmethod
     def _notify(progress_callback, current: int, total: int, row: DossierRow) -> None:
@@ -96,13 +198,41 @@ class DossierFilePlacerService:
                 lookup.setdefault(normalize_for_match(source.document_name), source)
         return lookup
 
-    def _estimate_planned_actions(self, config: DossierConfig, rows: list[DossierRow]) -> int:
+    def _estimate_planned_actions(self, config: DossierConfig, rows: list[DossierRow], rules=None) -> int:
         total = 0
+        planned_destinations: set[str] = set()
+        active_rules = list(rules) if rules is not None else [rule for rule in self.sequence_service.sort_rules(config.rules) if self._is_phase2_folder(rule.target_folder)]
+        source_lookup = self._build_source_lookup(config.pdf_sources)
+
         for row in rows:
             if row.status in {DossierStatus.BLOCKED, DossierStatus.ERROR, DossierStatus.SKIPPED} or not row.matched_dossier_folders:
                 total += 1
                 continue
-            total += len(self._iter_targets(row)) * sum(1 for rule in self.sequence_service.sort_rules(config.rules) if self._is_phase2_folder(rule.target_folder))
+
+            for target in self._iter_targets(row):
+                for rule in active_rules:
+                    actual_target_folder = self._resolve_target_folder(rule.target_folder, target)
+                    if actual_target_folder is None:
+                        total += 1
+                        continue
+
+                    source_pdf = source_lookup.get(normalize_for_match(rule.name)) or source_lookup.get(normalize_for_match(rule.target_folder))
+                    effective_rule = rule
+                    if source_pdf and source_pdf.final_name_pattern:
+                        effective_rule = type(rule)(
+                            order=rule.order,
+                            name=rule.name,
+                            target_folder=rule.target_folder,
+                            pdf_name_pattern=source_pdf.final_name_pattern,
+                            enabled=rule.enabled,
+                            notes=rule.notes,
+                        )
+                    planned_path = actual_target_folder / self.sequence_service.build_destination_filename(row, effective_rule)
+                    destination_key = self._build_destination_key(planned_path)
+                    if destination_key in planned_destinations:
+                        continue
+                    planned_destinations.add(destination_key)
+                    total += 1
         return total
 
     @staticmethod
@@ -115,28 +245,49 @@ class DossierFilePlacerService:
         return [{"dossier_folder": row.matched_dossier_folders[i] if i < len(row.matched_dossier_folders) else "", "folder_5": row.matched_folder_5[i] if i < len(row.matched_folder_5) else "", "folder_6": row.matched_folder_6[i] if i < len(row.matched_folder_6) else "", "folder_7": row.matched_folder_7[i] if i < len(row.matched_folder_7) else ""} for i in range(size)]
 
     @staticmethod
-    def _detect_existing_destination(rule, planned_path: Path) -> tuple[Path | None, str]:
+    def _build_destination_key(planned_path: Path) -> str:
+        return normalize_for_match(str(planned_path.resolve(strict=False)))
+
+    @staticmethod
+    def _detect_existing_destination(rule, planned_path: Path) -> tuple[str, Path | None, str]:
         if planned_path.exists():
-            return planned_path, f"Se reemplazar? el documento existente {planned_path.name}."
+            return "final_exists", planned_path, f"El documento final ya existe: {planned_path.name}."
+        equivalent_path = DossierFilePlacerService._find_equivalent_destination(planned_path)
+        if equivalent_path is not None:
+            return "final_exists", equivalent_path, f"Ya existe un documento equivalente: {equivalent_path.name}."
         legacy_path = DossierFilePlacerService._find_folder5_legacy_path(rule, planned_path)
         if legacy_path is not None:
-            return legacy_path, f"Se reemplazar? {legacy_path.name} por {planned_path.name}."
-        return None, ""
+            return "legacy_exists", legacy_path, f"Se reemplazará {legacy_path.name} por {planned_path.name}."
+        return "missing", None, ""
+
+    @staticmethod
+    def _find_equivalent_destination(planned_path: Path) -> Path | None:
+        if not planned_path.parent.exists():
+            return None
+        expected_key = normalize_for_match(planned_path.stem)
+        if not expected_key:
+            return None
+        for candidate in planned_path.parent.glob("*.pdf"):
+            if candidate == planned_path:
+                continue
+            if normalize_for_match(candidate.stem) == expected_key:
+                return candidate
+        return None
 
     @staticmethod
     def _find_folder5_legacy_path(rule, planned_path: Path) -> Path | None:
-        target_key = normalize_for_match(getattr(rule, 'target_folder', ''))
-        rule_key = normalize_for_match(getattr(rule, 'name', ''))
+        target_key = normalize_for_match(getattr(rule, "target_folder", ""))
+        rule_key = normalize_for_match(getattr(rule, "name", ""))
         file_key = normalize_for_match(planned_path.name)
-        if not (target_key.startswith('5') and 'descriptivo de pintura' in file_key and 'descriptivo de pintura' in rule_key):
+        if not (target_key.startswith("5") and "descriptivo de pintura" in file_key and "descriptivo de pintura" in rule_key):
             return None
         if not planned_path.parent.exists():
             return None
-        for candidate in planned_path.parent.glob('*.pdf'):
+        for candidate in planned_path.parent.glob("*.pdf"):
             if candidate == planned_path:
                 continue
             candidate_key = normalize_for_match(candidate.stem)
-            if candidate_key.startswith('5 2 procedimiento aplicacion pintura'):
+            if candidate_key.startswith("5 2 procedimiento aplicacion pintura"):
                 return candidate
         return None
 

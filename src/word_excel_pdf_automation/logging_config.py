@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 
-from .config import LOG_DIR, LOG_FILE
+from .config import LOG_DIR, LOG_FILE, resolve_user_data_dir
 
 
 def configure_logging(project_root: Path) -> Path:
-    log_dir = project_root / LOG_DIR
+    log_dir = _resolve_log_dir(project_root)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / LOG_FILE
 
@@ -29,3 +30,9 @@ def configure_logging(project_root: Path) -> Path:
     root_logger.addHandler(console_handler)
 
     return log_path
+
+
+def _resolve_log_dir(project_root: Path) -> Path:
+    if getattr(sys, "frozen", False):
+        return resolve_user_data_dir() / LOG_DIR
+    return project_root / LOG_DIR

@@ -1,0 +1,7 @@
+﻿{
+    "enabled":  true,
+    "shared_root":  "\\\\comde015\\PUBLIC$\\CO_MDE_DISENO_DI\\RESPALDO DISEÑOS\\SAP - Respaldo diseños\\FORMATOS SAP\\AutomatizaciónDocumental\\dist\\published",
+    "manifest_name":  "latest.json",
+    "installer_name":  "",
+    "channel":  "stable"
+}

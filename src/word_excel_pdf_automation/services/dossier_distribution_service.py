@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import shutil
 
 from ..dossier_models import (
@@ -11,6 +12,10 @@ from ..dossier_models import (
     DossierRunSummary,
 )
 from .dossier_backup_service import DossierBackupService
+from ..utils.text import normalize_for_match
+
+
+_NUMERIC_PREFIX_PATTERN = re.compile(r"^\s*\d+(?:\.\d+)+\s+")
 
 
 class RealModeConfirmationRequiredError(RuntimeError):
@@ -27,11 +32,12 @@ class DossierDistributionService:
         *,
         confirm_real: bool,
         replace_existing: bool = True,
+        skip_if_destination_exists: bool = False,
         backup_root: Path | None = None,
         progress_callback=None,
     ) -> DossierRunSummary:
         if not confirm_real:
-            raise RealModeConfirmationRequiredError("La distribuci?n real requiere confirmaci?n expl?cita antes de escribir archivos.")
+            raise RealModeConfirmationRequiredError("La distribución real requiere confirmación explícita antes de escribir archivos.")
 
         executed_items: list[DossierActionResult] = []
         total_actions = len(summary.items)
@@ -39,7 +45,7 @@ class DossierDistributionService:
             if item.status in {DossierStatus.ERROR, DossierStatus.SKIPPED} or not item.source_pdf_path or not item.planned_path:
                 executed_items.append(item)
                 if progress_callback:
-                    progress_callback(index, total_actions, f"Acci?n {index} de {total_actions}")
+                    progress_callback(index, total_actions, f"Acción {index} de {total_actions}")
                 continue
 
             execution = self.copy_or_replace(
@@ -47,11 +53,12 @@ class DossierDistributionService:
                 Path(item.planned_path),
                 confirm_real=True,
                 replace_existing=replace_existing,
+                skip_if_destination_exists=True,
                 backup_root=backup_root,
             )
             executed_items.append(self._merge_plan_and_execution(item, execution))
             if progress_callback:
-                progress_callback(index, total_actions, f"Acci?n {index} de {total_actions}")
+                progress_callback(index, total_actions, f"Acción {index} de {total_actions}")
 
         summary.items = executed_items
         summary.execution_mode = DossierExecutionMode.REAL
@@ -67,10 +74,11 @@ class DossierDistributionService:
         *,
         confirm_real: bool,
         replace_existing: bool = True,
+        skip_if_destination_exists: bool = False,
         backup_root: Path | None = None,
     ) -> DossierActionResult:
         if not confirm_real:
-            raise RealModeConfirmationRequiredError("La distribuci?n real requiere confirmaci?n expl?cita antes de escribir archivos.")
+            raise RealModeConfirmationRequiredError("La distribución real requiere confirmación explícita antes de escribir archivos.")
 
         if not source_pdf_path.is_file():
             return DossierActionResult(
@@ -91,15 +99,11 @@ class DossierDistributionService:
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         backup_root = backup_root or destination_path.parent / "_backups"
 
+        matched_final_path = destination_path if destination_path.exists() else self._find_equivalent_destination(destination_path)
         legacy_path = self._find_folder5_legacy_path(destination_path)
-        existing_targets: list[Path] = []
-        if destination_path.exists():
-            existing_targets.append(destination_path)
-        if legacy_path is not None and legacy_path not in existing_targets:
-            existing_targets.append(legacy_path)
+        final_document_exists = matched_final_path is not None
 
-        if existing_targets and not replace_existing:
-            existing_names = ", ".join(path.name for path in existing_targets)
+        if final_document_exists and skip_if_destination_exists:
             return DossierActionResult(
                 row_number=0,
                 cp="",
@@ -111,9 +115,31 @@ class DossierDistributionService:
                 action_type=DossierActionType.SKIPPED,
                 execution_mode=DossierExecutionMode.REAL,
                 status=DossierStatus.SKIPPED,
-                skipped_reason=f"No se agreg? porque ya existe: {existing_names}",
-                observation=f"No se puede agregar ya que los documentos est?n agregados en {destination_path.parent}.",
+                skipped_reason=f"El documento final ya existe: {matched_final_path.name if matched_final_path else destination_path.name}",
+                observation=f"No se puede agregar ni reemplazar porque el documento ya está correcto en {destination_path.parent}.",
             )
+
+        if legacy_path is not None and not replace_existing:
+            return DossierActionResult(
+                row_number=0,
+                cp="",
+                serie="",
+                rule_name="distribution",
+                target_folder=str(destination_path.parent),
+                planned_path=str(destination_path),
+                source_pdf_path=str(source_pdf_path),
+                action_type=DossierActionType.SKIPPED,
+                execution_mode=DossierExecutionMode.REAL,
+                status=DossierStatus.SKIPPED,
+                skipped_reason=f"No se reemplazó porque ya existe el documento legacy: {legacy_path.name}",
+                observation=f"No se puede reemplazar porque ya existe un documento en {destination_path.parent} y la opción de reemplazo está desactivada.",
+            )
+
+        existing_targets: list[Path] = []
+        if matched_final_path is not None:
+            existing_targets.append(matched_final_path)
+        if legacy_path is not None and legacy_path not in existing_targets:
+            existing_targets.append(legacy_path)
 
         backup_paths: list[str] = []
         for existing_path in existing_targets:
@@ -135,6 +161,8 @@ class DossierDistributionService:
         shutil.copy2(source_pdf_path, destination_path)
         if legacy_path is not None and legacy_path.exists() and legacy_path != destination_path:
             legacy_path.unlink()
+        if matched_final_path is not None and matched_final_path.exists() and matched_final_path != destination_path:
+            matched_final_path.unlink()
 
         return DossierActionResult(
             row_number=0,
@@ -153,20 +181,44 @@ class DossierDistributionService:
         )
 
     @staticmethod
+    def _find_equivalent_destination(destination_path: Path) -> Path | None:
+        if not destination_path.parent.exists():
+            return None
+        expected_key = normalize_for_match(destination_path.stem)
+        expected_key_without_prefix = DossierDistributionService._normalized_without_numeric_prefix(destination_path.stem)
+        if not expected_key and not expected_key_without_prefix:
+            return None
+        for candidate in destination_path.parent.glob("*.pdf"):
+            if candidate == destination_path:
+                continue
+            candidate_key = normalize_for_match(candidate.stem)
+            if expected_key and candidate_key == expected_key:
+                return candidate
+            candidate_key_without_prefix = DossierDistributionService._normalized_without_numeric_prefix(candidate.stem)
+            if expected_key_without_prefix and candidate_key_without_prefix == expected_key_without_prefix:
+                return candidate
+        return None
+
+    @staticmethod
+    def _normalized_without_numeric_prefix(filename_stem: str) -> str:
+        return normalize_for_match(_NUMERIC_PREFIX_PATTERN.sub("", filename_stem or "").strip())
+
+    @staticmethod
     def _find_folder5_legacy_path(destination_path: Path) -> Path | None:
-        file_key = destination_path.name.lower()
-        if "5.2 descriptivo de pintura" not in file_key:
+        file_key = normalize_for_match(destination_path.name)
+        if "5 2 descriptivo de pintura pdf" not in file_key and "5 2 descriptivo de pintura" not in file_key:
             return None
         if not destination_path.parent.exists():
             return None
         for candidate in destination_path.parent.glob("*.pdf"):
             if candidate == destination_path:
                 continue
-            candidate_key = candidate.stem.lower()
-            normalized = "".join(ch if ch.isalnum() else " " for ch in candidate_key)
-            normalized = " ".join(normalized.split())
-            if normalized.startswith("5 2 procedimiento aplicacion pintura"):
-                return candidate
+            candidate_key = normalize_for_match(candidate.stem)
+            if not candidate_key.startswith("5 2 procedimiento aplicacion pintura"):
+                continue
+            if "tanques" not in candidate_key:
+                continue
+            return candidate
         return None
 
     @staticmethod

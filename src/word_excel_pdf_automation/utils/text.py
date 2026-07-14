@@ -18,8 +18,20 @@ _WINDOWS_RESERVED_NAMES = {
 }
 
 
+
+
+def repair_mojibake(value: str) -> str:
+    text = value or ""
+    try:
+        repaired = text.encode("latin-1").decode("utf-8")
+    except UnicodeError:
+        return text
+    return repaired if repaired else text
+
+
 def normalize_for_match(value: str) -> str:
-    value = unicodedata.normalize("NFKD", value or "")
+    value = repair_mojibake(str(value or ""))
+    value = unicodedata.normalize("NFKD", value)
     value = "".join(ch for ch in value if not unicodedata.combining(ch))
     value = value.lower().strip()
     return _NON_ALNUM.sub(" ", value).strip()

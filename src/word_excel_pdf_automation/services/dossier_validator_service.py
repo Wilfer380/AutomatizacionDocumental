@@ -147,13 +147,13 @@ class DossierValidatorService:
         return None
 
     def find_folder_5(self, dossier_folder: Path) -> Path | None:
-        return self._find_phase2_folder(dossier_folder, ("5 Procedimiento de fabricaci?n", "5 Procedimiento de fabricacion", "Procedimiento de fabricaci?n", "Procedimiento de fabricacion", "5 Procedimiento de fabricaci?n", "Procedimiento de fabricaci?n", "5", "05"))
+        return self._find_phase2_folder(dossier_folder, ("5 Procedimiento de fabricación", "5 Procedimiento de fabricacion", "Procedimiento de fabricación", "Procedimiento de fabricacion", "5", "05"))
 
     def find_folder_6(self, dossier_folder: Path) -> Path | None:
-        return self._find_phase2_folder(dossier_folder, ("6 Trazabilidad", "Trazabilidad", "6 Registros de informe de inspecci?n", "6 Registros de informe de inspeccion", "6 Registros Informes de Inspecci?n", "6 Registros Informes de Inspeccion", "Registros de informe de inspecci?n", "Registros de informe de inspeccion", "Registros Informes de Inspecci?n", "Registros Informes de Inspeccion", "6", "06"))
+        return self._find_phase2_folder(dossier_folder, ("6 Trazabilidad", "Trazabilidad", "6 Registros de informe de inspección", "6 Registros de informe de inspeccion", "6 Registros Informes de Inspección", "6 Registros Informes de Inspeccion", "Registros de informe de inspección", "Registros de informe de inspeccion", "Registros Informes de Inspección", "Registros Informes de Inspeccion", "6", "06"))
 
     def find_folder_7(self, dossier_folder: Path) -> Path | None:
-        return self._find_phase2_folder(dossier_folder, ("7 Ensayos", "Ensayos", "7 Pruebas El?ctricas", "7 Pruebas Electricas", "Pruebas El?ctricas", "Pruebas Electricas", "7", "07"))
+        return self._find_phase2_folder(dossier_folder, ("7 Ensayos", "Ensayos", "7 Pruebas Eléctricas", "7 Pruebas Electricas", "Pruebas Eléctricas", "Pruebas Electricas", "7", "07"))
 
     def inspect_workbook(self, config: DossierConfig) -> DossierWorkbookInfo:
         workbook = load_workbook(config.excel_path, read_only=True, data_only=True)
@@ -256,7 +256,7 @@ class DossierValidatorService:
                     row.observation = "Serie no encontrada en 06_DOSSIER para esta CP"
                 elif any(candidate.dossier_exists for candidate in candidate_details):
                     row.status = DossierStatus.SKIPPED
-                    row.observation = "Existe 06_DOSSIER, pero no se encontr? carpeta Planos"
+                    row.observation = "Existe 06_DOSSIER, pero no se encontró carpeta Planos"
                 else:
                     row.status = DossierStatus.SKIPPED
                     row.observation = "Carpeta CP encontrada, pero no existe 06_DOSSIER"
@@ -334,7 +334,7 @@ class DossierValidatorService:
                     best_name = candidate
         if best_name and best_score >= 0.45:
             return best_name
-        raise DossierWorkbookHeaderError(f"No se encontr? una columna que coincida con: {', '.join(synonyms)}")
+        raise DossierWorkbookHeaderError(f"No se encontró una columna que coincida con: {', '.join(synonyms)}")
 
     @staticmethod
     def _resolve_column_index(columns: list[DossierColumnInfo], column_name: str) -> int:
@@ -342,7 +342,7 @@ class DossierValidatorService:
         for column in columns:
             if normalize_for_match(column.name) == target:
                 return column.index
-        raise DossierWorkbookHeaderError(f"La columna '{column_name}' no se encontr? en el libro.")
+        raise DossierWorkbookHeaderError(f"La columna '{column_name}' no se encontró en el libro.")
 
     def _inspect_row_candidates(self, config: DossierConfig, row: DossierRow, runtime_index: DossierRuntimeIndex | None = None) -> tuple[Path | None, str, list[DossierValidationCandidate]]:
         runtime_index = runtime_index or self._build_runtime_index(config.root_path)
@@ -390,12 +390,12 @@ class DossierValidatorService:
         if dossier_folder is None:
             return "Carpeta candidata encontrada, pero no existe 06_DOSSIER."
         if planos_folder is None:
-            return "Existe 06_DOSSIER, pero no se encontr? carpeta Planos."
+            return "Existe 06_DOSSIER, pero no se encontró carpeta Planos."
         if not series_found:
-            return "La serie no se encontr? en esta carpeta CP."
+            return "La serie no se encontró en esta carpeta CP."
         if valid_for_distribution:
-            return "Carpeta v?lida para distribuci?n."
-        return "Candidata no v?lida para distribuci?n."
+            return "Carpeta válida para distribución."
+        return "Candidata no válida para distribución."
 
     def _find_phase2_folder(self, dossier_folder: Path, terms: tuple[str, ...]) -> Path | None:
         if not dossier_folder.is_dir():

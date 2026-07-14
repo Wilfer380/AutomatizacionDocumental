@@ -11,6 +11,7 @@ from .dossier_distribution_service import DossierDistributionService, RealModeCo
 from .dossier_file_placer_service import DossierFilePlacerService
 from .dossier_report_service import DossierReportService
 from .dossier_simulation_workspace_service import DossierSimulationWorkspaceService
+from .dossier_sequence_service import DossierSequenceService
 from .dossier_validator_service import DossierValidatorService, DossierWorkbookHeaderError
 
 
@@ -25,6 +26,7 @@ class DossierService:
         self.backup_service = backup_service or DossierBackupService()
         self.distribution_service = distribution_service or DossierDistributionService(self.backup_service)
         self.simulation_workspace_service = simulation_workspace_service or DossierSimulationWorkspaceService()
+        self.sequence_service = DossierSequenceService()
 
     def load_config(self, config_path: Path | None = None) -> DossierConfig:
         resolved_path = config_path or DEFAULT_DOSSIER_CONFIG_PATH
@@ -98,15 +100,23 @@ class DossierService:
         return self.placer.build_simulation(config, validated_rows, progress_callback=progress_callback)
 
     def _filter_rows(self, config: DossierConfig, rows: list) -> list:
+        cp_filters = {normalize_for_match(value) for value in getattr(config, "cp_filters", ()) if normalize_for_match(value)}
+        serie_filters = {normalize_for_match(value) for value in getattr(config, "serie_filters", ()) if normalize_for_match(value)}
+
         cp_filter = normalize_for_match(config.cp_filter)
         serie_filter = normalize_for_match(config.serie_filter)
-        if not cp_filter and not serie_filter:
+        if cp_filter:
+            cp_filters.add(cp_filter)
+        if serie_filter:
+            serie_filters.add(serie_filter)
+
+        if not cp_filters and not serie_filters:
             return rows
 
         filtered_rows = []
         for row in rows:
-            cp_matches = not cp_filter or cp_filter in (row.normalized_cp or '')
-            serie_matches = not serie_filter or serie_filter in (row.normalized_serie or '')
+            cp_matches = not cp_filters or (row.normalized_cp or '') in cp_filters
+            serie_matches = not serie_filters or (row.normalized_serie or '') in serie_filters
             if cp_matches and serie_matches:
                 filtered_rows.append(row)
         return filtered_rows
@@ -114,28 +124,18 @@ class DossierService:
     def _build_phase1_routes(self, config: DossierConfig, summary: DossierRunSummary, phase1_items: list) -> list[DossierActionResult]:
         from ..utils.text import normalize_for_match
 
-        dossier_targets_by_row: dict[int, list[tuple[str, str, str]]] = {}
-        seen_targets: set[tuple[int, str]] = set()
-        for item in summary.items:
-            if item.row_number <= 0 or not item.target_folder:
-                continue
-            dossier_folder = str(Path(item.target_folder).parent)
-            if not dossier_folder:
-                continue
-            dedupe_key = (item.row_number, dossier_folder)
-            if dedupe_key in seen_targets:
-                continue
-            seen_targets.add(dedupe_key)
-            dossier_targets_by_row.setdefault(item.row_number, []).append((item.cp, item.serie, dossier_folder))
+        dossier_targets_by_row = self._build_phase1_target_map(config)
 
         routed_items: list[DossierActionResult] = []
+        folder6_sections: dict[str, int] = {}
+        folder6_reserved_items: dict[str, set[int]] = {}
         for generation in phase1_items:
             candidate_targets = dossier_targets_by_row.get(getattr(generation, 'row_number', 0), [])
             pdf_path = Path(getattr(generation, 'pdf_path', '') or getattr(generation, 'pdf_filename', ''))
             pdf_filename = getattr(generation, 'pdf_filename', '') or pdf_path.name
             generation_series = getattr(generation, 'series', '')
             if not candidate_targets:
-                routed_items.append(DossierActionResult(row_number=getattr(generation, 'row_number', 0), cp='', serie=generation_series, rule_name='phase1-routing', target_folder='', planned_path='', source_pdf_path=str(pdf_path), action_type=DossierActionType.SKIPPED, execution_mode=DossierExecutionMode.SIMULATION, status=DossierStatus.SKIPPED, skipped_reason='No se encontr? una fila validada del dossier para la ruta.', observation='Ruta de Fase 1 omitida.'))
+                routed_items.append(DossierActionResult(row_number=getattr(generation, 'row_number', 0), cp='', serie=generation_series, rule_name='phase1-routing', target_folder='', planned_path='', source_pdf_path=str(pdf_path), action_type=DossierActionType.SKIPPED, execution_mode=DossierExecutionMode.SIMULATION, status=DossierStatus.SKIPPED, skipped_reason='No se encontró una fila validada del dossier para la ruta.', observation='Ruta de Fase 1 omitida.'))
                 continue
             for cp_value, serie_value, dossier_folder_value in candidate_targets:
                 if normalize_for_match(serie_value) != normalize_for_match(generation_series):
@@ -145,7 +145,23 @@ class DossierService:
                 if not destination_folder:
                     routed_items.append(DossierActionResult(row_number=getattr(generation, 'row_number', 0), cp=cp_value, serie=serie_value, rule_name='phase1-routing', target_folder='', planned_path='', source_pdf_path=str(pdf_path), action_type=DossierActionType.SKIPPED, execution_mode=DossierExecutionMode.SIMULATION, status=DossierStatus.SKIPPED, skipped_reason='No fue posible resolver la carpeta 6 del dossier.', observation='Ruta de Fase 1 omitida.'))
                     continue
-                planned_path = destination_folder / pdf_filename
+                destination_key = str(destination_folder)
+                section_number = folder6_sections.setdefault(destination_key, self.sequence_service.next_folder6_section(destination_folder))
+                reserved_items = folder6_reserved_items.setdefault(destination_key, set())
+                planned_filename = self.sequence_service.build_phase1_folder6_filename(
+                    destination_folder,
+                    pdf_filename,
+                    str(generation_series),
+                    section_number=section_number,
+                    reserved_item_numbers=reserved_items,
+                )
+                reserved_item = self.sequence_service.resolve_folder6_item_number(
+                    destination_folder,
+                    str(generation_series),
+                    reserved_item_numbers=reserved_items,
+                )
+                reserved_items.add(reserved_item)
+                planned_path = destination_folder / planned_filename
                 if not pdf_path.is_file():
                     routed_items.append(DossierActionResult(row_number=getattr(generation, 'row_number', 0), cp=cp_value, serie=serie_value, rule_name='phase1-routing', target_folder=str(destination_folder), planned_path=str(planned_path), source_pdf_path=str(pdf_path), action_type=DossierActionType.SKIPPED, execution_mode=DossierExecutionMode.SIMULATION, status=DossierStatus.WARNING, skipped_reason='PDF generado por Fase 1 no encontrado para la serie.', observation='Ruta de Fase 1 omitida.'))
                     continue
@@ -161,7 +177,32 @@ class DossierService:
                                 planned_path,
                                 confirm_real=True,
                                 replace_existing=config.replace_existing,
+                                skip_if_destination_exists=True,
                             ),
                         )
                     )
         return routed_items
+
+    def _build_phase1_target_map(self, config: DossierConfig) -> dict[int, list[tuple[str, str, str]]]:
+        dossier_targets_by_row: dict[int, list[tuple[str, str, str]]] = {}
+        try:
+            _workbook_info, rows = self.validator.load_rows(config)
+            rows = self._filter_rows(config, rows)
+            validated_rows = self.validator.validate_paths(config, rows)
+        except Exception:
+            logger.exception("No se pudieron resolver las rutas de Fase 1 desde las filas validadas")
+            return dossier_targets_by_row
+
+        seen_targets: set[tuple[int, str]] = set()
+        for row in validated_rows:
+            if row.row_number <= 0 or not row.dossier_folder:
+                continue
+            dossier_folder = str(row.dossier_folder).strip()
+            if not dossier_folder:
+                continue
+            dedupe_key = (row.row_number, dossier_folder)
+            if dedupe_key in seen_targets:
+                continue
+            seen_targets.add(dedupe_key)
+            dossier_targets_by_row.setdefault(row.row_number, []).append((row.cp, row.serie, dossier_folder))
+        return dossier_targets_by_row

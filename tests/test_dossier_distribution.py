@@ -24,7 +24,7 @@ def _write_workbook(path: Path, headers: list[str], rows: list[list[object]]) ->
     return path
 
 
-def _build_config(*, root_path: Path, excel_path: Path, simulation_only: bool = True, cp_filter: str = '', serie_filter: str = '', replace_existing: bool = True) -> DossierConfig:
+def _build_config(*, root_path: Path, excel_path: Path, simulation_only: bool = True, cp_filter: str = '', serie_filter: str = '', cp_filters: list[str] | None = None, serie_filters: list[str] | None = None, replace_existing: bool = True) -> DossierConfig:
     source_root = excel_path.parent
     return DossierConfig.from_mapping(
         {
@@ -35,6 +35,8 @@ def _build_config(*, root_path: Path, excel_path: Path, simulation_only: bool = 
             "replace_existing": replace_existing,
             "cp_filter": cp_filter,
             "serie_filter": serie_filter,
+            "cp_filters": cp_filters or [],
+            "serie_filters": serie_filters or [],
             "cp_synonyms": ["Centro Proyecto"],
             "serie_synonyms": ["Número de serie"],
             "pdf_sources": [
@@ -184,7 +186,7 @@ def test_series_is_found_when_dossier_name_has_suffix(tmp_path: Path) -> None:
         "1084638314",
     )
     folder_6 = dossier / "6 Registros Informes de Inspeccion"
-    (folder_6 / "6.1.8 Registro Chequeo Estanqueidad SN 1084638314.pdf").write_bytes(b"%PDF-1.4\n")
+    _create_pdf(folder_6 / "6.1.8 SN 1084638314.pdf")
 
     _, rows = DossierValidatorService().load_rows(_build_config(root_path=root_path, excel_path=workbook_path))
     validated = DossierValidatorService().validate_paths(_build_config(root_path=root_path, excel_path=workbook_path), rows)
@@ -294,6 +296,8 @@ def test_phase1_routing_success_and_mismatch(tmp_path: Path) -> None:
     phase1_ok = next(item for item in summary_ok.items if item.rule_name == "phase1-routing")
     assert phase1_ok.status == DossierStatus.PLANNED
     assert "6 Trazabilidad" in phase1_ok.target_folder
+    assert Path(phase1_ok.planned_path).name.startswith("6.")
+    assert "Certificado de Trazabilidad de Ensayos de Pintura SN S-001" in Path(phase1_ok.planned_path).name
     assert next(item for item in summary_bad.items if item.rule_name == "phase1-routing").status == DossierStatus.SKIPPED
 
 
@@ -312,7 +316,8 @@ def test_phase1_routing_finds_folder_6_from_dossier_targets(tmp_path: Path) -> N
     phase1_item = next(item for item in summary.items if item.rule_name == "phase1-routing")
     assert phase1_item.status == DossierStatus.PLANNED
     assert phase1_item.target_folder.endswith("6 Trazabilidad")
-    assert phase1_item.planned_path.endswith(source_pdf.name)
+    assert Path(phase1_item.planned_path).name.startswith("6.")
+    assert source_pdf.stem in Path(phase1_item.planned_path).stem
 
 
 def test_phase1_routing_targets_folder_6_for_matching_series(tmp_path: Path) -> None:
@@ -331,6 +336,44 @@ def test_phase1_routing_targets_folder_6_for_matching_series(tmp_path: Path) -> 
     assert phase1_item.status == DossierStatus.PLANNED
     assert "6 Trazabilidad" in phase1_item.target_folder
     assert "6 Trazabilidad" in phase1_item.planned_path
+    assert Path(phase1_item.planned_path).name.startswith("6.")
+
+
+def test_phase1_routing_uses_folder6_escalability_per_series(tmp_path: Path) -> None:
+    workbook_path = _write_workbook(
+        tmp_path / "phase1-folder6-escalability.xlsx",
+        ["Centro Proyecto", "Numero de serie"],
+        [["CP-01", "100001"], ["CP-01", "100002"], ["CP-01", "100003"]],
+    )
+    root_path = tmp_path / "root"
+    cp_folder = _build_cp_tree(root_path, "CP-01", "100001", "100002", "100003")
+    _create_all_sources(tmp_path)
+    folder_6 = cp_folder / "06_DOSSIER" / "6 Trazabilidad"
+    _create_pdf(folder_6 / "6.1.1 Registro previo SN 100001.pdf")
+    _create_pdf(folder_6 / "6.1.2 Registro previo SN 100002.pdf")
+    _create_pdf(folder_6 / "6.1.3 Registro previo SN 100003.pdf")
+
+    phase1_items = [
+        SimpleNamespace(row_number=2, series="100001", pdf_filename="Certificado de Trazabilidad de Ensayos de Pintura SN 100001.pdf", pdf_path=str(_create_pdf(tmp_path / "sources" / "phase1-100001.pdf"))),
+        SimpleNamespace(row_number=3, series="100002", pdf_filename="Certificado de Trazabilidad de Ensayos de Pintura SN 100002.pdf", pdf_path=str(_create_pdf(tmp_path / "sources" / "phase1-100002.pdf"))),
+        SimpleNamespace(row_number=4, series="100003", pdf_filename="Certificado de Trazabilidad de Ensayos de Pintura SN 100003.pdf", pdf_path=str(_create_pdf(tmp_path / "sources" / "phase1-100003.pdf"))),
+    ]
+
+    summary = DossierService().run_distribution(
+        _build_config(root_path=root_path, excel_path=workbook_path),
+        confirm_real=False,
+        report_dir=tmp_path / "reports-folder6-escalability",
+        phase1_items=phase1_items,
+    )
+
+    phase1_routes = [item for item in summary.items if item.rule_name == "phase1-routing"]
+    names = [Path(item.planned_path).name for item in phase1_routes]
+
+    assert names == [
+        "6.2.1 Certificado de Trazabilidad de Ensayos de Pintura SN 100001.pdf",
+        "6.2.2 Certificado de Trazabilidad de Ensayos de Pintura SN 100002.pdf",
+        "6.2.3 Certificado de Trazabilidad de Ensayos de Pintura SN 100003.pdf",
+    ]
 
 
 def test_simulation_skips_existing_document_when_replace_disabled(tmp_path: Path) -> None:
@@ -358,7 +401,7 @@ def test_real_distribution_replaces_legacy_folder5_document(tmp_path: Path) -> N
     root_path = tmp_path / "root"
     cp_folder = _build_cp_tree(root_path, "CP-01", "S-001")
     _create_all_sources(tmp_path)
-    legacy_path = cp_folder / "06_DOSSIER" / "5 Procedimiento de fabricacion" / "5.2 Procedimiento Aplicacion Pintura Tanques.pdf"
+    legacy_path = cp_folder / "06_DOSSIER" / "5 Procedimiento de fabricacion" / "5.2 Procedimiento Aplicacion Pintura Tanques 2023.03.08.pdf"
     _create_pdf(legacy_path, b"%PDF-1.4\nold\n")
 
     summary = DossierService().run_distribution(
@@ -372,6 +415,94 @@ def test_real_distribution_replaces_legacy_folder5_document(tmp_path: Path) -> N
     assert descriptivo.status == DossierStatus.REPLACED
     assert new_path.exists()
     assert not legacy_path.exists()
+
+
+def test_real_distribution_deduplicates_shared_folder5_and_folder7_documents(tmp_path: Path) -> None:
+    workbook_path = _write_workbook(
+        tmp_path / "shared-docs.xlsx",
+        ["Centro Proyecto", "Numero de serie"],
+        [["CP-01", "S-001"], ["CP-01", "S-002"], ["CP-01", "S-003"]],
+    )
+    root_path = tmp_path / "root"
+    _build_cp_tree(root_path, "CP-01", "S-001", "S-002", "S-003")
+    _create_all_sources(tmp_path)
+
+    summary = DossierService().run_distribution(
+        _build_config(root_path=root_path, excel_path=workbook_path, simulation_only=False, replace_existing=True),
+        confirm_real=True,
+        report_dir=tmp_path / "reports-shared-docs",
+    )
+
+    folder5_items = [item for item in summary.items if item.rule_name == "Descriptivo de pintura"]
+    folder7_items = [item for item in summary.items if item.rule_name in {"Resultados adherencia", "Informe laboratorio"}]
+    folder6_items = [item for item in summary.items if item.rule_name == "Certificado trazabilidad"]
+
+    assert len(folder5_items) == 1
+    assert len(folder7_items) == 2
+    assert len(folder6_items) == 3
+    assert all(item.status in {DossierStatus.COPIED, DossierStatus.REPLACED} for item in folder5_items + folder7_items + folder6_items)
+    assert summary.warnings == 0
+
+
+def test_real_distribution_skips_existing_folder6_certificate_even_if_section_changes(tmp_path: Path) -> None:
+    workbook_path = _write_workbook(tmp_path / "folder6-existing.xlsx", ["Centro Proyecto", "Numero de serie"], [["CP-01", "S-001"]])
+    root_path = tmp_path / "root"
+    cp_folder = _build_cp_tree(root_path, "CP-01", "S-001")
+    _create_all_sources(tmp_path)
+
+    folder_6 = cp_folder / "06_DOSSIER" / "6 Trazabilidad"
+    _create_pdf(folder_6 / "6.11.10 Certificado de Trazabilidad de Ensayos de Pintura SN S-001.pdf", b"%PDF-1.4\nexisting\n")
+
+    phase1_item = SimpleNamespace(
+        row_number=2,
+        series="S-001",
+        pdf_filename="Certificado de Trazabilidad de Ensayos de Pintura SN S-001.pdf",
+        pdf_path=str(_create_pdf(tmp_path / "sources" / "phase1-s001.pdf")),
+    )
+
+    summary = DossierService().run_distribution(
+        _build_config(root_path=root_path, excel_path=workbook_path, simulation_only=False, replace_existing=True),
+        confirm_real=True,
+        report_dir=tmp_path / "reports-folder6-existing",
+        phase1_items=[phase1_item],
+    )
+
+    phase1_result = next(item for item in summary.items if item.rule_name == "phase1-routing")
+    certificates = sorted(path.name for path in folder_6.glob('*Certificado de Trazabilidad*.pdf'))
+
+    assert phase1_result.status == DossierStatus.SKIPPED
+    assert len(certificates) == 1
+    assert certificates[0] == "6.11.10 Certificado de Trazabilidad de Ensayos de Pintura SN S-001.pdf"
+
+
+def test_phase1_routing_keeps_all_series_when_folder5_and_folder7_are_deduplicated(tmp_path: Path) -> None:
+    workbook_path = _write_workbook(
+        tmp_path / "phase1-shared-docs.xlsx",
+        ["Centro Proyecto", "Numero de serie"],
+        [["CP-01", "S-001"], ["CP-01", "S-002"], ["CP-01", "S-003"]],
+    )
+    root_path = tmp_path / "root"
+    _build_cp_tree(root_path, "CP-01", "S-001", "S-002", "S-003")
+    _create_all_sources(tmp_path)
+
+    phase1_items = [
+        SimpleNamespace(row_number=2, series="S-001", pdf_filename="Certificado de Trazabilidad de Ensayos de Pintura SN S-001.pdf", pdf_path=str(_create_pdf(tmp_path / "sources" / "phase1-s001.pdf"))),
+        SimpleNamespace(row_number=3, series="S-002", pdf_filename="Certificado de Trazabilidad de Ensayos de Pintura SN S-002.pdf", pdf_path=str(_create_pdf(tmp_path / "sources" / "phase1-s002.pdf"))),
+        SimpleNamespace(row_number=4, series="S-003", pdf_filename="Certificado de Trazabilidad de Ensayos de Pintura SN S-003.pdf", pdf_path=str(_create_pdf(tmp_path / "sources" / "phase1-s003.pdf"))),
+    ]
+
+    summary = DossierService().run_distribution(
+        _build_config(root_path=root_path, excel_path=workbook_path, simulation_only=False, replace_existing=True),
+        confirm_real=True,
+        report_dir=tmp_path / "reports-phase1-shared-docs",
+        phase1_items=phase1_items,
+    )
+
+    phase1_routes = [item for item in summary.items if item.rule_name == "phase1-routing"]
+    assert len(phase1_routes) == 3
+    assert {item.serie for item in phase1_routes} == {"S-001", "S-002", "S-003"}
+    assert all(item.status in {DossierStatus.COPIED, DossierStatus.REPLACED, DossierStatus.SKIPPED} for item in phase1_routes)
+    assert all("No se encontr" not in (item.skipped_reason or "") for item in phase1_routes)
 
 
 def test_distribution_plans_multiple_targets_for_same_cp(tmp_path: Path) -> None:
@@ -493,3 +624,75 @@ def test_distribution_uses_distinct_sources_for_folder_7_rules(tmp_path: Path) -
     assert "7.2 Informe de Ensayo Laboratorio.pdf" in informe.source_pdf_path
 
 
+
+
+def test_real_distribution_skips_documents_when_rerun_on_same_folder(tmp_path: Path) -> None:
+    workbook_path = _write_workbook(tmp_path / "rerun-skip.xlsx", ["Centro Proyecto", "Numero de serie"], [["CP-01", "S-001"]])
+    root_path = tmp_path / "root"
+    cp_folder = _build_cp_tree(root_path, "CP-01", "S-001")
+    _create_all_sources(tmp_path)
+    legacy_path = cp_folder / "06_DOSSIER" / "5 Procedimiento de fabricacion" / "5.2 Procedimiento Aplicacion Pintura Tanques 2023.03.08.pdf"
+    _create_pdf(legacy_path, b"%PDF-1.4\nold\n")
+    config = _build_config(root_path=root_path, excel_path=workbook_path, simulation_only=False, replace_existing=True)
+
+    first_summary = DossierService().run_distribution(
+        config,
+        confirm_real=True,
+        report_dir=tmp_path / "reports-rerun-first",
+    )
+    second_summary = DossierService().run_distribution(
+        config,
+        confirm_real=True,
+        report_dir=tmp_path / "reports-rerun-second",
+    )
+
+    assert any(item.status == DossierStatus.REPLACED for item in first_summary.items if item.rule_name == "Descriptivo de pintura")
+    actionable_items = [item for item in second_summary.items if item.rule_name in {"Descriptivo de pintura", "Certificado trazabilidad", "Resultados adherencia", "Informe laboratorio"}]
+    assert actionable_items
+    assert all(item.status == DossierStatus.SKIPPED for item in actionable_items)
+    assert all("ya está correcto" in item.observation for item in actionable_items)
+
+
+def test_real_distribution_skips_equivalent_existing_folder7_document(tmp_path: Path) -> None:
+    workbook_path = _write_workbook(tmp_path / "existing-folder7-equivalent.xlsx", ["Centro Proyecto", "Numero de serie"], [["CP-01", "S-001"]])
+    root_path = tmp_path / "root"
+    cp_folder = _build_cp_tree(root_path, "CP-01", "S-001")
+    _create_all_sources(tmp_path)
+    config = _build_config(root_path=root_path, excel_path=workbook_path, simulation_only=False, replace_existing=True)
+
+    mojibake_name = f"7.1 Comunicado t{chr(0x00c3)}{chr(0x00a9)}cnico - Resultados de adherencia.pdf"
+    existing_target = cp_folder / "06_DOSSIER" / "7 Ensayos" / mojibake_name
+    _create_pdf(existing_target)
+
+    summary = DossierService().run_distribution(
+        config,
+        confirm_real=True,
+        report_dir=tmp_path / "reports-existing-folder7-equivalent",
+    )
+
+    comunicado = next(item for item in summary.items if item.rule_name == "Resultados adherencia")
+    assert comunicado.status == DossierStatus.SKIPPED
+    assert "ya está correcto" in comunicado.observation
+    folder7_files = list((cp_folder / "06_DOSSIER" / "7 Ensayos").glob("7.1*.pdf"))
+    assert len(folder7_files) == 1
+
+
+def test_run_simulation_filters_by_multiple_cp_and_serie_values(tmp_path: Path) -> None:
+    workbook_path = _write_workbook(
+        tmp_path / "equipos-multi-filter.xlsx",
+        ["Centro Proyecto", "Numero de serie"],
+        [["CP-01", "S-001"], ["CP-02", "S-002"], ["CP-03", "S-003"]],
+    )
+    root_path = tmp_path / "orders"
+    _build_cp_tree(root_path, "CP-01", "S-001")
+    _build_cp_tree(root_path, "CP-02", "S-002")
+    _build_cp_tree(root_path, "CP-03", "S-003")
+    _create_all_sources(tmp_path)
+
+    summary = DossierService().run_simulation(
+        _build_config(root_path=root_path, excel_path=workbook_path, cp_filters=["CP-01", "CP-03"], serie_filters=["S-001", "S-003"]),
+        report_dir=tmp_path / "reports-multi-filter-list",
+    )
+
+    rows = {item.row_number for item in summary.items if item.rule_name == "Descriptivo de pintura"}
+    assert rows == {2, 4}

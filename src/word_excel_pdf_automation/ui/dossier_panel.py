@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 import os
@@ -19,12 +19,19 @@ from ..dossier_models import DossierConfig, DossierExecutionMode, DossierRow, Do
 from ..services.dossier_service import DossierService
 from ..services.dossier_validator_service import DossierValidationTreeRow, DossierValidatorService
 from ..utils.text import normalize_for_match
+from .filter_dropdown import MultiSelectDropdown
 
 
 logger = logging.getLogger(__name__)
 
 PROGRESS_ANIMATION_MS = 10
 QUEUE_POLL_MS = 50
+
+
+PLACEHOLDER_ROOT_PATH = r"Ejemplo: Q:\GROUPS\CO_MDE_DISENO_DI\01_ORDERS\02_DOCUMENTS_APPROVAL_CERTIFIED"
+PLACEHOLDER_EXCEL_PATH = r"Ejemplo: C:\Users\...\Listado equipos SLA COL.xlsx"
+PLACEHOLDER_PDF_PATH = "Seleccioná el PDF correspondiente..."
+PLACEHOLDER_PHASE1_FOLDER = r"Ejemplo: C:\Users\...\word_excel_pdf_output\PDF_generados"
 
 
 PALETTE = {
@@ -109,19 +116,19 @@ class DossierPanel(ttk.Frame):
         self.service = DossierService()
         self.validator = DossierValidatorService()
 
-        self.root_path_var = StringVar(value=str(DEFAULT_DOSSIER_ROOT_PATH))
-        self.excel_path_var = StringVar(value=str(DEFAULT_DOSSIER_EXCEL_PATH))
+        self.root_path_var = StringVar(value=PLACEHOLDER_ROOT_PATH)
+        self.excel_path_var = StringVar(value=PLACEHOLDER_EXCEL_PATH)
         self.sheet_var = StringVar(value="Hoja1")
         self.cp_column_var = StringVar(value="CP")
         self.serie_column_var = StringVar(value="Serie")
 
-        self.route_status_var = StringVar(value="Ruta válida.")
-        self.excel_status_var = StringVar(value="Excel cargado correctamente. 156 registro(s) encontrados.")
+        self.route_status_var = StringVar(value="Sin ruta cargada.")
+        self.excel_status_var = StringVar(value="Sin Excel cargado.")
 
-        self.descriptivo_var = StringVar(value=r"C:\Docs\Descriptivo de pintura.pdf")
-        self.comunicado_var = StringVar(value=r"C:\Docs\Comunicado técnico - Resultados de adherencia.pdf")
-        self.informe_var = StringVar(value=r"C:\Docs\Informe de Ensayo Laboratorio - prueba adherencia.pdf")
-        self.phase1_folder_var = StringVar(value=r"C:\Automatizacion\Fase1\PDF_generados")
+        self.descriptivo_var = StringVar(value=PLACEHOLDER_PDF_PATH)
+        self.comunicado_var = StringVar(value=PLACEHOLDER_PDF_PATH)
+        self.informe_var = StringVar(value=PLACEHOLDER_PDF_PATH)
+        self.phase1_folder_var = StringVar(value=PLACEHOLDER_PHASE1_FOLDER)
         self.use_phase1_var = BooleanVar(value=True)
 
         self.simulation_var = BooleanVar(value=True)
@@ -131,19 +138,21 @@ class DossierPanel(ttk.Frame):
         self.open_report_var = BooleanVar(value=True)
         self.execution_cp_filter_var = StringVar(value="Todas")
         self.execution_serie_filter_var = StringVar(value="Todas")
+        self._selected_cp_filters: list[str] = []
+        self._selected_serie_filters: list[str] = []
 
         self.preview_filter_var = StringVar(value="")
-        self.progress_state_var = StringVar(value="Validando serie 12546447010 en Q:\\...\\CP_17655479_B\\06_DOSSIER\\2 Planos...")
-        self.progress_percent_var = StringVar(value="62%")
-        self.processed_var = StringVar(value="97 / 156")
-        self.correct_var = StringVar(value="78")
-        self.warning_var = StringVar(value="12")
-        self.error_var = StringVar(value="8")
-        self.skipped_var = StringVar(value="1")
+        self.progress_state_var = StringVar(value="Listo para validar CP y Series")
+        self.progress_percent_var = StringVar(value="0%")
+        self.processed_var = StringVar(value="0 / 0")
+        self.correct_var = StringVar(value="0")
+        self.warning_var = StringVar(value="0")
+        self.error_var = StringVar(value="0")
+        self.skipped_var = StringVar(value="0")
 
-        self.report_path_var = StringVar(value=r"C:\Automatizacion\Reportes\reporte_distribucion_20250706_153045.xlsx")
-        self.log_path_var = StringVar(value=r"C:\Automatizacion\Logs\log_distribucion_20250706_153045.txt")
-        self.last_update_var = StringVar(value="06/07/2026 15:30:45")
+        self.report_path_var = StringVar(value="")
+        self.log_path_var = StringVar(value="")
+        self.last_update_var = StringVar(value="")
 
         self._operation_queue: queue.Queue = queue.Queue()
         self._operation_worker: threading.Thread | None = None
@@ -154,8 +163,8 @@ class DossierPanel(ttk.Frame):
         self._active_action_button: ttk.Button | None = None
         self._default_button_labels: dict[ttk.Button, str] = {}
         self._excel_rows_cache = []
-        self._execution_cp_values: tuple[str, ...] = ("Todas",)
-        self._execution_series_values: tuple[str, ...] = ("Todas",)
+        self._execution_cp_values: tuple[str, ...] = ()
+        self._execution_series_values: tuple[str, ...] = ()
         self._execution_series_by_cp: dict[str, tuple[str, ...]] = {}
         self._validation_rows_cache: list[DossierRow] = []
         self._validation_tree_cache: list[DossierValidationTreeRow] = []
@@ -364,17 +373,19 @@ class DossierPanel(ttk.Frame):
         filters.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         filters.columnconfigure(1, weight=1)
         filters.columnconfigure(3, weight=1)
+
         ttk.Label(filters, text="Filtro CP:", style="FieldLabel.TLabel").grid(row=0, column=0, sticky="w", pady=6)
-        self.execution_cp_combo = ttk.Combobox(filters, textvariable=self.execution_cp_filter_var, values=self._execution_cp_values, state="readonly", style="App.TCombobox")
-        self.execution_cp_combo.grid(row=0, column=1, sticky="ew", padx=(8, 16), pady=6)
-        self.execution_cp_combo.bind("<<ComboboxSelected>>", self._on_execution_cp_selected)
+        self.execution_cp_dropdown = MultiSelectDropdown(filters, title="Filtro CP", on_selection_changed=self._on_cp_filter_changed)
+        self.execution_cp_dropdown.grid(row=0, column=1, sticky="ew", padx=(8, 16), pady=6)
+
         ttk.Label(filters, text="Filtro Serie:", style="FieldLabel.TLabel").grid(row=0, column=2, sticky="w", pady=6)
-        self.execution_serie_combo = ttk.Combobox(filters, textvariable=self.execution_serie_filter_var, values=self._execution_series_values, state="readonly", style="App.TCombobox")
-        self.execution_serie_combo.grid(row=0, column=3, sticky="ew", padx=(8, 8), pady=6)
+        self.execution_serie_dropdown = MultiSelectDropdown(filters, title="Filtro Serie", on_selection_changed=self._on_serie_filter_changed)
+        self.execution_serie_dropdown.grid(row=0, column=3, sticky="ew", padx=(8, 8), pady=6)
+
         ttk.Button(filters, text="Limpiar", style="Ghost.TButton", command=self._clear_execution_filters).grid(row=0, column=4, sticky="e", pady=6)
         tk.Label(
             filters,
-            text="Seleccion? la CP y luego una de sus series. Si dej?s 'Todas', procesa todo.",
+            text="Seleccioná una o varias CP y, si querés, una o varias series. Si dejás 'Todas', procesa todo.",
             bg=PALETTE["surface"],
             fg=PALETTE["muted"],
             font=("Segoe UI", 8),
@@ -492,8 +503,10 @@ class DossierPanel(ttk.Frame):
         utilities.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         utilities.columnconfigure(0, weight=1)
         utilities.columnconfigure(1, weight=1)
+        utilities.columnconfigure(2, weight=1)
         ttk.Button(utilities, text="Abrir reporte", style="Ghost.TButton", command=self.open_report).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(utilities, text="Abrir log", style="Ghost.TButton", command=self.open_log).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        ttk.Button(utilities, text="Abrir log", style="Ghost.TButton", command=self.open_log).grid(row=0, column=1, sticky="ew", padx=(6, 6))
+        ttk.Button(utilities, text="Limpiar todo", style="Ghost.TButton", command=self.clear_all_fields).grid(row=0, column=2, sticky="ew", padx=(6, 0))
 
     def _build_section_6(self, parent: ttk.Frame) -> None:
         card, body = self._section_card(parent, "6. Vista previa de la distribución", PALETTE["accent"])
@@ -670,18 +683,34 @@ class DossierPanel(ttk.Frame):
         return math.sin(math.radians(angle_degrees))
 
     def _toggle_phase1_folder_state(self) -> None:
-        if self.use_phase1_var.get():
-            self.phase1_folder_var.set(self.phase1_folder_var.get() or r"C:\Automatizacion\Fase1\PDF_generados")
+        if not self.use_phase1_var.get():
+            self.phase1_folder_var.set(PLACEHOLDER_PHASE1_FOLDER)
+
+    @staticmethod
+    def _is_placeholder_value(value: str) -> bool:
+        raw = (value or "").strip()
+        return raw in {
+            PLACEHOLDER_ROOT_PATH,
+            PLACEHOLDER_EXCEL_PATH,
+            PLACEHOLDER_PDF_PATH,
+            PLACEHOLDER_PHASE1_FOLDER,
+        }
+
+    def _read_input(self, variable: StringVar) -> str:
+        raw = (variable.get() or "").strip()
+        return "" if self._is_placeholder_value(raw) else raw
 
     # ------------------------------------------------------------------ Browse / validate
     def _browse_root(self) -> None:
-        path = filedialog.askdirectory(initialdir=self.root_path_var.get())
+        initial_dir = self._read_input(self.root_path_var) or str(Path.home())
+        path = filedialog.askdirectory(initialdir=initial_dir)
         if path:
             self.root_path_var.set(path)
             self.validate_root_path()
 
     def _browse_excel(self) -> None:
-        initial = Path(self.excel_path_var.get()).parent if self.excel_path_var.get() else Path.home()
+        excel_value = self._read_input(self.excel_path_var)
+        initial = Path(excel_value).parent if excel_value else Path.home()
         path = filedialog.askopenfilename(initialdir=str(initial), filetypes=[("Excel", "*.xlsx")])
         if path:
             self.excel_path_var.set(path)
@@ -693,19 +722,30 @@ class DossierPanel(ttk.Frame):
             variable.set(path)
 
     def _browse_phase1_folder(self) -> None:
-        path = filedialog.askdirectory(initialdir=self.phase1_folder_var.get())
+        initial_dir = self._read_input(self.phase1_folder_var) or str(Path.home())
+        path = filedialog.askdirectory(initialdir=initial_dir)
         if path:
             self.phase1_folder_var.set(path)
 
     def validate_root_path(self) -> None:
-        root = Path(self.root_path_var.get().strip())
+        root_value = self._read_input(self.root_path_var)
+        if not root_value:
+            self.route_status_var.set("Sin ruta cargada.")
+            return
+        root = Path(root_value)
         if root.exists():
             self.route_status_var.set("Ruta válida.")
         else:
             self.route_status_var.set("Ruta no encontrada.")
 
     def _refresh_excel_metadata(self) -> None:
-        excel_path = Path(self.excel_path_var.get().strip())
+        excel_value = self._read_input(self.excel_path_var)
+        if not excel_value:
+            self._excel_rows_cache = []
+            self._populate_execution_filters([])
+            self.excel_status_var.set("Sin Excel cargado.")
+            return
+        excel_path = Path(excel_value)
         if not excel_path.exists():
             self._excel_rows_cache = []
             self._populate_execution_filters([])
@@ -739,6 +779,19 @@ class DossierPanel(ttk.Frame):
         raw = (value or "").strip()
         return "" if raw.lower() == "todas" else raw
 
+    def _get_available_series_for_selected_cps(self) -> tuple[str, ...]:
+        if not self._selected_cp_filters:
+            return self._execution_series_values
+
+        available: list[str] = []
+        seen: set[str] = set()
+        for cp in self._selected_cp_filters:
+            for serie in self._execution_series_by_cp.get(cp, ()): 
+                if serie and serie not in seen:
+                    seen.add(serie)
+                    available.append(serie)
+        return tuple(available)
+
     def _populate_execution_filters(self, rows: list[DossierRow]) -> None:
         cp_values: list[str] = []
         all_series: list[str] = []
@@ -760,57 +813,100 @@ class DossierPanel(ttk.Frame):
                 if serie_value not in series_by_cp[cp_value]:
                     series_by_cp[cp_value].append(serie_value)
 
-        self._execution_cp_values = tuple(["Todas", *cp_values]) if cp_values else ("Todas",)
+        self._execution_cp_values = tuple(cp_values)
         self._execution_series_by_cp = {cp: tuple(values) for cp, values in series_by_cp.items()}
-        self._execution_series_values = tuple(["Todas", *all_series]) if all_series else ("Todas",)
+        self._execution_series_values = tuple(all_series)
+        self._selected_cp_filters = [cp for cp in self._selected_cp_filters if cp in self._execution_cp_values]
+        self._refresh_execution_filter_widgets()
 
-        if hasattr(self, "execution_cp_combo"):
-            self.execution_cp_combo.configure(values=self._execution_cp_values)
-        current_cp = self._normalize_execution_filter(self.execution_cp_filter_var.get())
-        self.execution_cp_filter_var.set(current_cp if current_cp in cp_values else "Todas")
-        self._refresh_execution_series_options()
+    def _refresh_execution_filter_widgets(self) -> None:
+        available_series = self._get_available_series_for_selected_cps()
+        self._selected_serie_filters = [serie for serie in self._selected_serie_filters if serie in available_series]
+        if hasattr(self, "execution_cp_dropdown"):
+            self.execution_cp_dropdown.set_options(self._execution_cp_values)
+            self.execution_cp_dropdown.set_selected(self._selected_cp_filters)
+        if hasattr(self, "execution_serie_dropdown"):
+            self.execution_serie_dropdown.set_options(available_series)
+            self.execution_serie_dropdown.set_selected(self._selected_serie_filters)
+            self.execution_serie_dropdown.set_enabled(bool(available_series))
 
-    def _refresh_execution_series_options(self) -> None:
-        selected_cp = self._normalize_execution_filter(self.execution_cp_filter_var.get())
-        if selected_cp:
-            available_series = self._execution_series_by_cp.get(selected_cp, ())
-        else:
-            available_series = tuple(value for value in self._execution_series_values if value != "Todas")
+    def _on_cp_filter_changed(self, selected: list[str]) -> None:
+        self._selected_cp_filters = list(selected)
+        self._refresh_execution_filter_widgets()
 
-        combo_values = tuple(["Todas", *available_series]) if available_series else ("Todas",)
-        if hasattr(self, "execution_serie_combo"):
-            self.execution_serie_combo.configure(values=combo_values)
-        current_serie = self._normalize_execution_filter(self.execution_serie_filter_var.get())
-        self.execution_serie_filter_var.set(current_serie if current_serie in available_series else "Todas")
-
-    def _on_execution_cp_selected(self, _event=None) -> None:
-        self._refresh_execution_series_options()
+    def _on_serie_filter_changed(self, selected: list[str]) -> None:
+        self._selected_serie_filters = list(selected)
+        self._refresh_execution_filter_widgets()
 
     def _clear_execution_filters(self) -> None:
-        self.execution_cp_filter_var.set("Todas")
-        self._refresh_execution_series_options()
-        self.execution_serie_filter_var.set("Todas")
+        self._selected_cp_filters = []
+        self._selected_serie_filters = []
+        self._refresh_execution_filter_widgets()
+
+    def clear_all_fields(self) -> None:
+        if self._operation_running:
+            messagebox.showinfo("Fase 2", "No se puede limpiar mientras hay una operación en curso.")
+            return
+
+        self.root_path_var.set(PLACEHOLDER_ROOT_PATH)
+        self.excel_path_var.set(PLACEHOLDER_EXCEL_PATH)
+        self.sheet_var.set("Hoja1")
+        self.cp_column_var.set("CP")
+        self.serie_column_var.set("Serie")
+        self.descriptivo_var.set(PLACEHOLDER_PDF_PATH)
+        self.comunicado_var.set(PLACEHOLDER_PDF_PATH)
+        self.informe_var.set(PLACEHOLDER_PDF_PATH)
+        self.phase1_folder_var.set(PLACEHOLDER_PHASE1_FOLDER)
+
+        self.use_phase1_var.set(True)
+        self.simulation_var.set(True)
+        self.backup_var.set(True)
+        self.replace_var.set(True)
+        self.continue_var.set(True)
+        self.open_report_var.set(True)
+
+        self.route_status_var.set("Sin ruta cargada.")
+        self.excel_status_var.set("Sin Excel cargado.")
+        self.preview_filter_var.set("")
+
+        self._sheet_values = ("Hoja1",)
+        if hasattr(self, "sheet_combo"):
+            self.sheet_combo.configure(values=self._sheet_values)
+
+        self._excel_rows_cache = []
+        self._validation_rows_cache = []
+        self._validation_tree_cache = []
+        self._execution_cp_values = ()
+        self._execution_series_values = ()
+        self._execution_series_by_cp = {}
+        self._selected_cp_filters = []
+        self._selected_serie_filters = []
+        self._last_summary = None
+        self._operation_total = 0
+
+        self._refresh_execution_filter_widgets()
+        self._reset_initial_state()
 
     # ------------------------------------------------------------------ Config / execution
     def _build_config(self, *, simulation_only: bool) -> DossierConfig:
         pdf_sources = [
             {
                 "document_name": "Descriptivo de pintura",
-                "source_pdf_path": self.descriptivo_var.get().strip(),
+                "source_pdf_path": self._read_input(self.descriptivo_var),
                 "target_folder": "5 Procedimiento de fabricación",
                 "final_name_pattern": "5.2 Descriptivo de pintura.pdf",
                 "mandatory": True,
             },
             {
                 "document_name": "Comunicado técnico",
-                "source_pdf_path": self.comunicado_var.get().strip(),
+                "source_pdf_path": self._read_input(self.comunicado_var),
                 "target_folder": "7 Ensayos",
                 "final_name_pattern": "7.1 Comunicado técnico - Resultados de adherencia.pdf",
                 "mandatory": True,
             },
             {
                 "document_name": "Informe laboratorio",
-                "source_pdf_path": self.informe_var.get().strip(),
+                "source_pdf_path": self._read_input(self.informe_var),
                 "target_folder": "7 Ensayos",
                 "final_name_pattern": "7.2 Informe de Ensayo Laboratorio - prueba adherencia.pdf",
                 "mandatory": True,
@@ -818,14 +914,16 @@ class DossierPanel(ttk.Frame):
         ]
         return DossierConfig.from_mapping(
             {
-                "root_path": self.root_path_var.get().strip(),
-                "excel_path": self.excel_path_var.get().strip(),
+                "root_path": self._read_input(self.root_path_var),
+                "excel_path": self._read_input(self.excel_path_var),
                 "sheet_name": self.sheet_var.get().strip(),
                 "dossier_folder_name": "06_DOSSIER",
                 "simulation_only": simulation_only,
                 "replace_existing": self.replace_var.get(),
-                "cp_filter": self._normalize_execution_filter(self.execution_cp_filter_var.get()),
-                "serie_filter": self._normalize_execution_filter(self.execution_serie_filter_var.get()),
+                "cp_filter": self._selected_cp_filters[0] if len(self._selected_cp_filters) == 1 else "",
+                "serie_filter": self._selected_serie_filters[0] if len(self._selected_serie_filters) == 1 else "",
+                "cp_filters": list(self._selected_cp_filters),
+                "serie_filters": list(self._selected_serie_filters),
                 "cp_synonyms": [self.cp_column_var.get().strip() or "CP"],
                 "serie_synonyms": [self.serie_column_var.get().strip() or "Serie"],
                 "pdf_sources": pdf_sources,
@@ -856,18 +954,18 @@ class DossierPanel(ttk.Frame):
             config = self._build_config(simulation_only=simulation_only)
             self._cancel_requested.clear()
             self._operation_running = True
-            self._current_operation_label = "simulaci?n" if simulation_only else "ejecuci?n real"
+            self._current_operation_label = "simulación" if simulation_only else "ejecución real"
             active_button = self.simulate_button if simulation_only else self.real_button
             self._set_running_state(True, active_button=active_button)
             self._set_operation_progress(0, 0, action_label)
             self.update_idletasks()
 
             if hasattr(self.winfo_toplevel(), "footer_mode_var"):
-                self.winfo_toplevel().footer_mode_var.set("Simulaci?n" if simulation_only else "Real")
+                self.winfo_toplevel().footer_mode_var.set("Simulación" if simulation_only else "Real")
 
             def progress_update(current: int, total: int, message: str) -> None:
                 if self._cancel_requested.is_set():
-                    raise OperationCancelledError("Operaci?n cancelada por el usuario.")
+                    raise OperationCancelledError("Operación cancelada por el usuario.")
                 self._operation_queue.put(("progress", (current, total, message)))
 
             def worker() -> None:
@@ -908,17 +1006,17 @@ class DossierPanel(ttk.Frame):
             config = self._build_config(simulation_only=True)
             self._cancel_requested.clear()
             self._operation_running = True
-            self._current_operation_label = "validaci?n"
+            self._current_operation_label = "validación"
             self._set_running_state(True, active_button=self.validate_button)
             self._set_operation_progress(0, 0, "Validando CP y Series")
             self.update_idletasks()
 
             if hasattr(self.winfo_toplevel(), "footer_mode_var"):
-                self.winfo_toplevel().footer_mode_var.set("Simulaci?n")
+                self.winfo_toplevel().footer_mode_var.set("Simulación")
 
             def progress_update(current: int, total: int, message: str) -> None:
                 if self._cancel_requested.is_set():
-                    raise OperationCancelledError("Operaci?n cancelada por el usuario.")
+                    raise OperationCancelledError("Operación cancelada por el usuario.")
                 self._operation_queue.put(("progress", (current, total, message)))
 
             def worker() -> None:
@@ -944,9 +1042,11 @@ class DossierPanel(ttk.Frame):
             self._operation_running = False
 
     def _build_phase1_items(self, config: DossierConfig) -> list[SimpleNamespace]:
-        folder = Path(self.phase1_folder_var.get().strip())
+        folder_value = self._read_input(self.phase1_folder_var)
+        folder = Path(folder_value) if folder_value else Path()
         try:
             _workbook_info, rows = self.validator.load_rows(config)
+            rows = self.service._filter_rows(config, rows)
         except Exception:
             return []
 
@@ -1013,7 +1113,7 @@ class DossierPanel(ttk.Frame):
                     rows, tree_rows = payload
                     self._apply_validation_rows(rows, tree_rows)
                     final_total = max(self._operation_total or len(rows), 1)
-                    self._set_operation_progress(final_total, final_total, "Validaci?n completada")
+                    self._set_operation_progress(final_total, final_total, "Validación completada")
                     self._show_validation_dialog(tree_rows)
                     continue
                 if kind == "done":
@@ -1021,15 +1121,15 @@ class DossierPanel(ttk.Frame):
                     self._set_running_state(False)
                     self._apply_summary(payload)
                     final_total = max(payload.planned_actions or len(payload.items), 1)
-                    self._set_operation_progress(final_total, final_total, "Simulaci?n completada" if payload.execution_mode == DossierExecutionMode.SIMULATION else "Ejecuci?n real completada")
+                    self._set_operation_progress(final_total, final_total, "Simulación completada" if payload.execution_mode == DossierExecutionMode.SIMULATION else "Ejecución real completada")
                     self._show_distribution_dialog(payload)
                     if self.open_report_var.get():
                         if getattr(payload, 'simulation_root', '') and payload.execution_mode == DossierExecutionMode.SIMULATION:
                             simulation_root = Path(getattr(payload, 'simulation_root', ''))
                             if simulation_root.exists():
-                                self.after(200, lambda: self._open_path(str(simulation_root), "Simulaci?n"))
+                                self.after(200, lambda: self._open_path(str(simulation_root), "Simulación"))
                             else:
-                                logger.warning("La carpeta de simulaci?n no existe: %s", simulation_root)
+                                logger.warning("La carpeta de simulación no existe: %s", simulation_root)
                         else:
                             self.after(200, self.open_report)
                     continue
@@ -1044,7 +1144,7 @@ class DossierPanel(ttk.Frame):
                 if kind == "error":
                     self._operation_running = False
                     self._set_running_state(False)
-                    self.progress_state_var.set(f"La {self._current_operation_label} fall?")
+                    self.progress_state_var.set(f"La {self._current_operation_label} falló")
                     logger.exception("Phase 2 execution failed: %s", payload)
                     messagebox.showerror("Fase 2", str(payload))
         except queue.Empty:
@@ -1068,10 +1168,10 @@ class DossierPanel(ttk.Frame):
         self.processed_var.set(f"{processed} / {processed}")
         self.progress_percent_var.set("100%")
         self.progress["value"] = 100
-        self.progress_state_var.set("Simulaci?n completada" if summary.execution_mode == DossierExecutionMode.SIMULATION else "Ejecuci?n real completada")
+        self.progress_state_var.set("Simulación completada" if summary.execution_mode == DossierExecutionMode.SIMULATION else "Ejecución real completada")
 
         if hasattr(self.winfo_toplevel(), "footer_mode_var"):
-            self.winfo_toplevel().footer_mode_var.set("Simulaci?n" if summary.execution_mode == DossierExecutionMode.SIMULATION else "Real")
+            self.winfo_toplevel().footer_mode_var.set("Simulación" if summary.execution_mode == DossierExecutionMode.SIMULATION else "Real")
 
     def _apply_validation_rows(self, rows: list[DossierRow], tree_rows: list[DossierValidationTreeRow]) -> None:
         self._validation_rows_cache = rows
@@ -1159,14 +1259,14 @@ class DossierPanel(ttk.Frame):
         for row in tree_rows:
             row_status_label = STATUS_LABELS.get(row.status, row.status.value.title()) if isinstance(row.status, DossierStatus) else str(row.status)
             candidate_count = len(row.candidates)
-            row_detail = f"Estado: {row_status_label} ? {row.observation or 'Sin observaciones'} ? Carpetas CP revisadas: {candidate_count}"
+            row_detail = f"Estado: {row_status_label} | {row.observation or 'Sin observaciones'} | Carpetas CP revisadas: {candidate_count}"
             row_children: list[dict[str, object]] = []
             if row.selected_cp_folder:
                 row_children.append(
                     {
-                        "text": f"Carpeta CP v?lida: {Path(row.selected_cp_folder).name}",
+                        "text": f"Carpeta CP válida: {Path(row.selected_cp_folder).name}",
                         "status": "correct",
-                        "detail": "Carpeta seleccionada para distribuci?n.",
+                        "detail": "Carpeta seleccionada para distribución.",
                         "children": [],
                     }
                 )
@@ -1184,7 +1284,7 @@ class DossierPanel(ttk.Frame):
                     {
                         "text": "Carpeta CP no encontrada",
                         "status": "error",
-                        "detail": f"No se encontr? una carpeta candidata para {row.cp}.",
+                        "detail": f"No se encontró una carpeta candidata para {row.cp}.",
                         "children": [],
                     }
                 )
@@ -1194,7 +1294,7 @@ class DossierPanel(ttk.Frame):
                     {
                         "text": "Sin candidatos CP",
                         "status": "error",
-                        "detail": "No se encontraron carpetas CP candidatas en la ruta ra?z.",
+                        "detail": "No se encontraron carpetas CP candidatas en la ruta raíz.",
                         "children": [],
                     }
                 )
@@ -1206,9 +1306,9 @@ class DossierPanel(ttk.Frame):
                     for location in getattr(candidate, "series_locations", [])[:20]
                 ]
                 candidate_children = [
-                    {"text": "06_DOSSIER", "status": "correct" if candidate.dossier_exists else "error", "detail": candidate.dossier_folder or ("S?" if candidate.dossier_exists else "No"), "children": []},
-                    {"text": "Planos", "status": "correct" if candidate.planos_exists else "error", "detail": candidate.planos_folder or ("S?" if candidate.planos_exists else "No"), "children": []},
-                    {"text": "Serie encontrada", "status": "correct" if candidate.series_found else "error", "detail": "S?" if candidate.series_found else "No", "children": series_location_nodes},
+                    {"text": "06_DOSSIER", "status": "correct" if candidate.dossier_exists else "error", "detail": candidate.dossier_folder or ("Sí" if candidate.dossier_exists else "No"), "children": []},
+                    {"text": "Planos", "status": "correct" if candidate.planos_exists else "error", "detail": candidate.planos_folder or ("Sí" if candidate.planos_exists else "No"), "children": []},
+                    {"text": "Serie encontrada", "status": "correct" if candidate.series_found else "error", "detail": "Sí" if candidate.series_found else "No", "children": series_location_nodes},
                     {"text": "Carpeta 5", "status": "correct" if candidate.folder_5_exists else "warning", "detail": candidate.folder_5 or "No", "children": []},
                     {"text": "Carpeta 6", "status": "correct" if candidate.folder_6_exists else "warning", "detail": candidate.folder_6 or "No", "children": []},
                     {"text": "Carpeta 7", "status": "correct" if candidate.folder_7_exists else "warning", "detail": candidate.folder_7 or "No", "children": []},
@@ -1407,14 +1507,14 @@ class DossierPanel(ttk.Frame):
                 planned = Path(item.planned_path)
                 if len(planned.parents) >= 3:
                     bucket["carpeta_cp"] = str(planned.parents[2])
-                bucket["serie_planos"] = "S?"
+                bucket["serie_planos"] = "Sí"
                 target_folder = normalize_for_match(getattr(item, "target_folder", ""))
                 if target_folder.startswith("5"):
-                    bucket["carpeta_5"] = "S?"
+                    bucket["carpeta_5"] = "Sí"
                 elif target_folder.startswith("6"):
-                    bucket["carpeta_6"] = "S?"
+                    bucket["carpeta_6"] = "Sí"
                 elif target_folder.startswith("7"):
-                    bucket["carpeta_7"] = "S?"
+                    bucket["carpeta_7"] = "Sí"
                 if getattr(item, "action_type", None) and getattr(item, "action_type").name in {"COPY", "REPLACE", "PLANNED"}:
                     bucket["accion"] += 1
             elif getattr(item, "rule_name", "") == "phase1-routing" and getattr(item, "status", None) == DossierStatus.SKIPPED:
@@ -1439,28 +1539,28 @@ class DossierPanel(ttk.Frame):
 
             if has_error:
                 bucket["estado"] = DossierStatus.ERROR
-                bucket["observacion"] = error_messages[-1] if error_messages else (all_messages[-1] if all_messages else "La fila present? errores.")
+                bucket["observacion"] = error_messages[-1] if error_messages else (all_messages[-1] if all_messages else "La fila presentó errores.")
             elif has_success and (has_warning or has_skipped):
                 bucket["estado"] = DossierStatus.WARNING
                 success_total = len(success_statuses)
                 skipped_total = sum(1 for status in statuses if status in {DossierStatus.WARNING, DossierStatus.SKIPPED})
-                detail_message = warning_messages[-1] if warning_messages else (skipped_messages[-1] if skipped_messages else "Revis? el detalle.")
+                detail_message = warning_messages[-1] if warning_messages else (skipped_messages[-1] if skipped_messages else "Revisá el detalle.")
                 bucket["observacion"] = f"Se agregaron correctamente {success_total} documento(s). {skipped_total} quedaron pendientes u omitidos. {detail_message}"
             elif has_success:
                 bucket["estado"] = self._best_success_status(success_statuses)
                 bucket["observacion"] = success_messages[-1] if success_messages else "Agregado correctamente."
             elif has_warning:
                 bucket["estado"] = DossierStatus.WARNING
-                bucket["observacion"] = warning_messages[-1] if warning_messages else "Revis? el detalle de la fila."
+                bucket["observacion"] = warning_messages[-1] if warning_messages else "Revisá el detalle de la fila."
             else:
                 bucket["estado"] = DossierStatus.SKIPPED
-                bucket["observacion"] = skipped_messages[-1] if skipped_messages else (all_messages[-1] if all_messages else "No se agreg? ning?n documento.")
+                bucket["observacion"] = skipped_messages[-1] if skipped_messages else (all_messages[-1] if all_messages else "No se agregó ningún documento.")
 
             if bucket["estado"] == DossierStatus.VALID and action_count == 0:
                 action_count = 4 if self.use_phase1_var.get() else 3
             bucket["accion"] = f"{action_count} documentos" if action_count else "0 documentos"
             if has_success:
-                bucket["serie_planos"] = "S?"
+                bucket["serie_planos"] = "Sí"
             result.append(bucket)
         return result
 
@@ -1593,7 +1693,7 @@ class DossierResultDialog(tk.Toplevel):
         self.configure(bg=PALETTE["background"])
         self.geometry("1280x780")
         self.minsize(1120, 680)
-        self.transient(parent.winfo_toplevel())
+        self.resizable(True, True)
         self.protocol("WM_DELETE_WINDOW", self._close_dialog)
         self.bind("<Escape>", lambda _event: self._close_dialog())
 
@@ -1791,3 +1891,4 @@ class DossierResultDialog(tk.Toplevel):
             self.destroy()
         except Exception:
             pass
+

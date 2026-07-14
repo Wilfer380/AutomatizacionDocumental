@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -16,6 +17,7 @@ from ..services.excel_service import ExcelService
 from ..services.pdf_converter import PdfConverter
 from ..services.report_service import ReportService
 from ..services.template_service import TemplateService
+from ..services.update_service import UpdateService
 from .dossier_panel import DossierPanel
 from ..utils.files import open_folder
 
@@ -72,6 +74,7 @@ class MainWindow(Tk):
         self.report_service = ReportService()
         self.pdf_converter = PdfConverter()
         self.batch_service = BatchService(self.template_service, self.pdf_converter, self.report_service)
+        self.update_service = UpdateService()
 
         self.workbook_info: WorkbookInfo | None = None
         self.series_rows: list[SeriesRow] = []
@@ -82,6 +85,8 @@ class MainWindow(Tk):
         self.worker: threading.Thread | None = None
         self._generation_running = False
         self._cancel_requested = False
+        self._update_check_running = False
+        self._update_prompted_version = ""
 
         self.template_var = StringVar(value=str(DEFAULT_TEMPLATE_PATH))
         self.excel_var = StringVar(value=str(DEFAULT_EXCEL_PATH))
@@ -109,11 +114,14 @@ class MainWindow(Tk):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        self._window_icon_image = None
+        self._configure_window_icon()
         self._configure_style()
         self._build_ui()
         self.after(0, self._maximize_to_screen)
         self.after(80, self._bring_to_front)
         self.after(120, self._poll_queue)
+        self.after(1500, self._start_update_check)
 
     def _maximize_to_screen(self) -> None:
         try:
@@ -128,6 +136,20 @@ class MainWindow(Tk):
             self.attributes("-topmost", True)
             self.after(250, lambda: self.attributes("-topmost", False))
             self.focus_force()
+        except Exception:
+            pass
+
+    def _configure_window_icon(self) -> None:
+        try:
+            if getattr(sys, "frozen", False):
+                base_path = Path(sys._MEIPASS)  # type: ignore[attr-defined]
+            else:
+                base_path = Path(__file__).resolve().parents[3]
+            icon_path = base_path / "assets" / "app_icon.png"
+            if not icon_path.is_file():
+                return
+            self._window_icon_image = tk.PhotoImage(file=str(icon_path))
+            self.iconphoto(True, self._window_icon_image)
         except Exception:
             pass
 
@@ -249,7 +271,7 @@ class MainWindow(Tk):
         self.footer_user_var = StringVar(value="wandica")
         self.footer_profile_var = StringVar(value="Administrador")
         self.footer_mode_var = StringVar(value="Simulación")
-        self.footer_version_var = StringVar(value="1.0.0")
+        self.footer_version_var = StringVar(value=__version__)
 
         footer_left = tk.Frame(footer_inner, bg=PALETTE["header_dark"])
         footer_left.grid(row=0, column=0, sticky="w")
@@ -904,6 +926,51 @@ class MainWindow(Tk):
         except queue.Empty:
             pass
         self.after(120, self._poll_queue)
+
+    def _start_update_check(self) -> None:
+        if self._update_check_running:
+            return
+        self._update_check_running = True
+
+        def worker() -> None:
+            try:
+                result = self.update_service.check_for_update(__version__)
+                if result.available:
+                    self.queue.put(("update_available", result))
+                else:
+                    self.queue.put(("update_none", result))
+            except Exception as exc:  # pragma: no cover - background thread
+                logger.exception("Update check failed", exc_info=exc)
+                self.queue.put(("update_error", exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _handle_update_available(self, result) -> None:
+        release = result.release
+        if release is None or release.version == self._update_prompted_version:
+            return
+
+        self._update_prompted_version = release.version
+        details = [f"Hay una nueva versi?n disponible: {release.version}."]
+        if release.published_at:
+            details.append(f"Publicada: {release.published_at}")
+        if release.notes:
+            details.append(f"Notas: {release.notes}")
+        details.append("?Quer?s descargarla e instalarla ahora?")
+
+        accepted = messagebox.askyesno("Actualizaci?n disponible", "\n".join(details))
+        if not accepted:
+            return
+
+        try:
+            staged_installer = self.update_service.stage_installer(release)
+            self.update_service.launch_installer(staged_installer)
+            messagebox.showinfo(
+                "Actualizaci?n iniciada",
+                "Se abri? el instalador de la nueva versi?n. Cerr? la aplicaci?n actual cuando el instalador te lo pida.",
+            )
+        except Exception as exc:
+            messagebox.showerror("No se pudo iniciar la actualizaci?n", str(exc))
 
     def open_output_folder(self) -> None:
         output = Path(self.output_var.get())

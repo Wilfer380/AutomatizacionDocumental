@@ -1,4 +1,4 @@
-__pycache__/
+﻿__pycache__/
 *.pyc
 *.pyo
 *.pyd
@@ -20,3 +20,6 @@ config.json
 
 .DS_Store
 Thumbs.db
+
+build/AutomatizacionDocumental/
+dist/

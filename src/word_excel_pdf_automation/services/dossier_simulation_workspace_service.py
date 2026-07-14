@@ -21,7 +21,7 @@ class DossierSimulationWorkspaceService:
         try:
             simulation_root.mkdir(parents=True, exist_ok=True)
         except OSError:
-            logger.exception("No se pudo crear la carpeta de simulaci?n: %s", simulation_root)
+            logger.exception("No se pudo crear la carpeta de simulación: %s", simulation_root)
             summary.simulation_root = ""
             return summary
 
@@ -35,7 +35,7 @@ class DossierSimulationWorkspaceService:
                 self._copy_with_long_path_support(source_path, destination)
                 item.simulation_path = str(destination)
             except OSError:
-                logger.exception("No se pudo materializar la simulaci?n para %s -> %s", source_path, destination)
+                logger.exception("No se pudo materializar la simulación para %s -> %s", source_path, destination)
                 item.simulation_path = ""
 
         summary.simulation_root = str(simulation_root)

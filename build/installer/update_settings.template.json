@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "shared_root": "__UPDATE_SHARED_ROOT__",
+  "manifest_name": "latest.json",
+  "installer_name": "",
+  "channel": "stable"
+}

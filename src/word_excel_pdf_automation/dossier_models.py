@@ -98,6 +98,8 @@ class DossierConfig:
     replace_existing: bool = True
     cp_filter: str = ""
     serie_filter: str = ""
+    cp_filters: tuple[str, ...] = ()
+    serie_filters: tuple[str, ...] = ()
     cp_synonyms: tuple[str, ...] = DOSSIER_CP_SYNONYMS
     serie_synonyms: tuple[str, ...] = DOSSIER_SERIE_SYNONYMS
     pdf_sources: list[DossierPdfSource] = field(default_factory=list)
@@ -152,6 +154,8 @@ class DossierConfig:
             replace_existing=bool(data.get("replace_existing", True)),
             cp_filter=str(data.get("cp_filter", "")).strip(),
             serie_filter=str(data.get("serie_filter", "")).strip(),
+            cp_filters=tuple(str(item).strip() for item in data.get("cp_filters", []) if str(item).strip()),
+            serie_filters=tuple(str(item).strip() for item in data.get("serie_filters", []) if str(item).strip()),
             cp_synonyms=tuple(str(item).strip() for item in data.get("cp_synonyms", DOSSIER_CP_SYNONYMS) if str(item).strip()),
             serie_synonyms=tuple(str(item).strip() for item in data.get("serie_synonyms", DOSSIER_SERIE_SYNONYMS) if str(item).strip()),
             pdf_sources=pdf_sources,
@@ -169,6 +173,8 @@ class DossierConfig:
             "replace_existing": self.replace_existing,
             "cp_filter": self.cp_filter,
             "serie_filter": self.serie_filter,
+            "cp_filters": list(self.cp_filters),
+            "serie_filters": list(self.serie_filters),
             "cp_synonyms": list(self.cp_synonyms),
             "serie_synonyms": list(self.serie_synonyms),
             "pdf_sources": [source.to_dict() for source in self.pdf_sources],
@@ -284,3 +290,4 @@ class DossierRunSummary:
             "simulation_root": self.simulation_root,
             "items": [item.to_dict() for item in self.items],
         }
+

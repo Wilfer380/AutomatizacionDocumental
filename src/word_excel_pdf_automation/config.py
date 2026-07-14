@@ -1,11 +1,13 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 
 APP_NAME = "AutomatizaciónDocumental"
+APP_DIR_NAME = "AutomatizacionDocumental"
 PLACEHOLDER = "[Serie]"
 OUTPUT_WORD_DIR = "Word_generados"
 OUTPUT_PDF_DIR = "PDF_generados"
@@ -16,13 +18,13 @@ LOG_FILE = "automatizaciondocumental.log"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-DEFAULT_TEMPLATE_PATH = Path(r"C:\Users\wandica\Downloads\Trazabilidad descrptivo pintura - serie.docx")
-DEFAULT_EXCEL_PATH = Path(r"C:\Users\wandica\Downloads\Listado equipos SLA COL.xlsx")
-DEFAULT_OUTPUT_DIR = Path(r"C:\Users\wandica\Downloads\word_excel_pdf_output")
+DEFAULT_TEMPLATE_PATH = Path.home() / "Downloads" / "Trazabilidad descrptivo pintura - serie.docx"
+DEFAULT_EXCEL_PATH = Path.home() / "Downloads" / "Listado equipos SLA COL.xlsx"
+DEFAULT_OUTPUT_DIR = Path.home() / "Downloads" / "word_excel_pdf_output"
 DEFAULT_DOSSIER_SIMULATION_DIR = DEFAULT_OUTPUT_DIR / "DossierSimulation"
 
 DEFAULT_DOSSIER_ROOT_PATH = Path(r"Q:\GROUPS\CO_MDE_DISENO_DI\01_ORDERS\02_DOCUMENTS_APPROVAL_CERTIFIED")
-DEFAULT_DOSSIER_EXCEL_PATH = Path(r"C:\Users\wandica\Downloads\Listado equipos SLA COL.xlsx")
+DEFAULT_DOSSIER_EXCEL_PATH = Path.home() / "Downloads" / "Listado equipos SLA COL.xlsx"
 DEFAULT_DOSSIER_CONFIG_PATH = PROJECT_ROOT / "config.json"
 DEFAULT_DOSSIER_CONFIG_EXAMPLE_PATH = PROJECT_ROOT / "config.example.json"
 
@@ -70,3 +72,16 @@ def write_json_file(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+
+def resolve_user_data_dir() -> Path:
+    local_appdata = os.getenv("LOCALAPPDATA", "").strip()
+    if local_appdata:
+        return Path(local_appdata) / APP_DIR_NAME
+
+    appdata = os.getenv("APPDATA", "").strip()
+    if appdata:
+        return Path(appdata) / APP_DIR_NAME
+
+    return Path.home() / APP_DIR_NAME
+
